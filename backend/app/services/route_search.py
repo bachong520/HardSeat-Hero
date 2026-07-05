@@ -121,7 +121,7 @@ class ParetoFrontier:
 
 
 class CheapestPathSearcher:
-    def __init__(self, route_search: "RouteSearchService") -> None:
+    def __init__(self, route_search: "ProviderBackedRouteSearchEngine") -> None:
         self.route_search = route_search
 
     async def search(self, query: RouteQuery, context: SearchContext) -> list[TransferPlan]:
@@ -218,7 +218,7 @@ class CheapestPathSearcher:
         return Decimal("0")
 
 
-class RouteSearchService:
+class ProviderBackedRouteSearchEngine:
     def __init__(
         self,
         provider: TrainDataProvider,
