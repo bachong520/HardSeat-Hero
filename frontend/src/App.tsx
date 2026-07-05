@@ -16,7 +16,6 @@ import {
   RouteSearchResponse,
   getProviderStatus,
   searchRoutesStream,
-  searchStations,
 } from "./lib/api";
 
 const today = new Date().toISOString().slice(0, 10);
@@ -35,8 +34,6 @@ export function App() {
   const [maxDetourKm, setMaxDetourKm] = useState("");
   const [corridorWidthKm, setCorridorWidthKm] = useState("");
   const [maxTotalDurationMinutes, setMaxTotalDurationMinutes] = useState("");
-  const [fromStationOptions, setFromStationOptions] = useState<string[]>([]);
-  const [toStationOptions, setToStationOptions] = useState<string[]>([]);
   const [result, setResult] = useState<RouteSearchResponse | null>(null);
   const [providerStatus, setProviderStatus] =
     useState<ProviderStatusResponse | null>(null);
@@ -65,50 +62,6 @@ export function App() {
       ignore = true;
     };
   }, []);
-
-  useEffect(() => {
-    let ignore = false;
-
-    async function loadStations() {
-      try {
-        const stations = await searchStations(fromStation);
-        if (!ignore) {
-          setFromStationOptions(stations);
-        }
-      } catch {
-        if (!ignore) {
-          setFromStationOptions([]);
-        }
-      }
-    }
-
-    loadStations();
-    return () => {
-      ignore = true;
-    };
-  }, [fromStation]);
-
-  useEffect(() => {
-    let ignore = false;
-
-    async function loadStations() {
-      try {
-        const stations = await searchStations(toStation);
-        if (!ignore) {
-          setToStationOptions(stations);
-        }
-      } catch {
-        if (!ignore) {
-          setToStationOptions([]);
-        }
-      }
-    }
-
-    loadStations();
-    return () => {
-      ignore = true;
-    };
-  }, [toStation]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -234,28 +187,16 @@ export function App() {
           >
             <Field label="出发地">
               <Input
-                list="from-station-options"
                 value={fromStation}
                 onChange={(event) => setFromStation(event.target.value)}
               />
             </Field>
             <Field label="目的地">
               <Input
-                list="to-station-options"
                 value={toStation}
                 onChange={(event) => setToStation(event.target.value)}
               />
             </Field>
-            <datalist id="from-station-options">
-              {fromStationOptions.map((station) => (
-                <option key={station} value={station} />
-              ))}
-            </datalist>
-            <datalist id="to-station-options">
-              {toStationOptions.map((station) => (
-                <option key={station} value={station} />
-              ))}
-            </datalist>
             <Field label="日期">
               <Input
                 type="date"

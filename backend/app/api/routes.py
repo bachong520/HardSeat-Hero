@@ -11,13 +11,13 @@ from app.adapters.base import (
     TrainDataProviderError,
 )
 from app.adapters.provider_factory import create_train_data_provider
-from app.domain.models import RouteQuery, RouteSearchResponse, StationSearchResponse
+from app.domain.models import RouteQuery
 from app.services.route_search_engine_factory import create_route_search_engine
 
 
 router = APIRouter()
-provider = create_train_data_provider()
-route_search_service = create_route_search_engine(provider)
+train_data_provider = create_train_data_provider()
+route_search_engine = create_route_search_engine(train_data_provider)
 
 
 @router.get("/health")
@@ -25,35 +25,12 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": "hardseat-hero-api"}
 
 
-@router.get("/stations/search", response_model=StationSearchResponse)
-async def search_stations(q: str = "") -> StationSearchResponse:
-    search = getattr(provider, "search_stations", None)
-    if search is None:
-        return StationSearchResponse(stations=[])
-
-    try:        # 防止search(q)抛异常直接冒泡到500 Interval Server Error
-        stations = search(q)
-        if hasattr(stations, "__await__"):
-            stations = await stations
-        return StationSearchResponse(stations=stations)
-    except TrainDataProviderError as exc:
-        raise HTTPException(status_code=provider_error_status_code(exc), detail=str(exc)) from exc
-
-
 @router.get("/providers/status")
 async def provider_status() -> dict[str, object]:
-    status = dict(route_search_service.status)
+    status = dict(route_search_engine.status)
     status.setdefault("online_remote_io", False)
     status["updated_at"] = datetime.now(timezone.utc).isoformat()
     return status
-
-
-@router.post("/routes/search", response_model=RouteSearchResponse)
-async def search_routes(query: RouteQuery) -> RouteSearchResponse:
-    try:
-        return await route_search_service.search(query)
-    except TrainDataProviderError as exc:
-        raise HTTPException(status_code=provider_error_status_code(exc), detail=str(exc)) from exc
 
 
 @router.post("/routes/search/stream")
@@ -61,7 +38,7 @@ async def stream_routes(query: RouteQuery) -> StreamingResponse:
     async def generate():
         started_at = perf_counter()
         try:
-            async for snapshot in route_search_service.stream_snapshots(query):
+            async for snapshot in route_search_engine.stream_snapshots(query):
                 payload = {
                     **snapshot,
                     "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
@@ -73,7 +50,7 @@ async def stream_routes(query: RouteQuery) -> StreamingResponse:
                 {
                     "type": "metadata",
                     "query_id": f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
-                    "source": route_search_service.source,
+                    "source": route_search_engine.source,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                     "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
                 },

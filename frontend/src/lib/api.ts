@@ -73,10 +73,6 @@ interface RouteSearchMetadata {
   elapsed_ms: number;
 }
 
-export interface StationSearchResponse {
-  stations: string[];
-}
-
 export interface ProviderStatusResponse {
   provider: string;
   status: string;
@@ -111,36 +107,6 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
-}
-
-export async function searchStations(query: string): Promise<string[]> {
-  const params = new URLSearchParams({ q: query });
-  const response = await fetch(
-    `${API_BASE_URL}/api/stations/search?${params.toString()}`,
-  );
-
-  if (!response.ok) {
-    throw await buildApiError(response, "站点查询失败");
-  }
-
-  const body: StationSearchResponse = await response.json();
-  return body.stations;
-}
-
-export async function searchRoutes(
-  payload: RouteSearchRequest,
-): Promise<RouteSearchResponse> {
-  const response = await fetch(`${API_BASE_URL}/api/routes/search`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    throw await buildApiError(response, "查询失败");
-  }
-
-  return response.json();
 }
 
 export async function searchRoutesStream(

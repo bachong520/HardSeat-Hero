@@ -78,10 +78,6 @@ class RouteSearchResponse(BaseModel):
     plans: list[TransferPlan]
 
 
-class StationSearchResponse(BaseModel):
-    stations: list[str]
-
-
 class StationMetadata(BaseModel):
     name: str
     telecode: str
