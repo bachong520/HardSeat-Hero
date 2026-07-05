@@ -37,9 +37,6 @@ class FailingRouteSearchEngine:
         },
     }
 
-    async def search(self, query: RouteQuery):
-        raise TrainDataProviderError("数据源失败")
-
     async def stream_snapshots(self, query: RouteQuery):
         if False:
             yield {}

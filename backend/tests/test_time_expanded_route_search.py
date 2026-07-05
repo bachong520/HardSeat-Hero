@@ -3,12 +3,24 @@ from __future__ import annotations
 import sqlite3
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from app.domain.models import RouteQuery
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge
 from app.services.time_expanded_route_search import TimeExpandedRouteSearchEngine
+
+
+async def final_response(engine: TimeExpandedRouteSearchEngine, query: RouteQuery):
+    snapshots = [snapshot async for snapshot in engine.stream_snapshots(query)]
+    assert snapshots
+    final_snapshot = snapshots[-1]
+    assert final_snapshot.get("final") is True
+    return SimpleNamespace(
+        source=final_snapshot["source"],
+        plans=final_snapshot["plans"],
+    )
 
 
 def insert_od_row(
@@ -107,7 +119,7 @@ async def test_time_expanded_search_returns_direct_plan(tmp_path) -> None:
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=0))
+    response = await final_response(engine, RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=0))
 
     assert response.source == "time-expanded"
     assert len(response.plans) == 1
@@ -141,7 +153,8 @@ async def test_time_expanded_search_returns_one_transfer_plan(tmp_path) -> None:
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(
+    response = await final_response(
+        engine,
         RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=1, min_transfer_minutes=30)
     )
 
@@ -178,7 +191,8 @@ async def test_time_expanded_search_rejects_insufficient_transfer_time(tmp_path)
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(
+    response = await final_response(
+        engine,
         RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=1, min_transfer_minutes=30)
     )
 
@@ -200,7 +214,7 @@ async def test_time_expanded_search_does_not_require_provider_argument(tmp_path)
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1)))
+    response = await final_response(engine, RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1)))
 
     assert response.plans[0].total_price == Decimal("309.0")
 
@@ -219,7 +233,7 @@ async def test_time_expanded_search_reads_train_od_fare_edges(tmp_path) -> None:
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 12), max_transfers=0))
+    response = await final_response(engine, RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 12), max_transfers=0))
 
     assert len(response.plans) == 3
     segment = response.plans[0].segments[0]
@@ -245,7 +259,7 @@ async def test_time_expanded_search_expands_cross_day_fare_edge(tmp_path) -> Non
     )
 
     engine = TimeExpandedRouteSearchEngine(repository)
-    response = await engine.search(RouteQuery(from_station="北京", to_station="广州", date=date(2026, 7, 12), max_transfers=0))
+    response = await final_response(engine, RouteQuery(from_station="北京", to_station="广州", date=date(2026, 7, 12), max_transfers=0))
 
     segment = response.plans[0].segments[0]
     assert segment.depart_at == datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)

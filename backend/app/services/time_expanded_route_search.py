@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from time import perf_counter
 
-from app.domain.models import RouteQuery, RouteSearchResponse, SeatPrice, TrainSegment, TransferPlan
+from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
 from app.services.route_search import StreamSnapshot
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
@@ -46,25 +46,16 @@ class TimeExpandedRouteSearchEngine:
             "online_remote_io": False,
         }
 
-    async def search(self, query: RouteQuery) -> RouteSearchResponse:
+    async def stream_snapshots(self, query: RouteQuery) -> AsyncIterator[StreamSnapshot]:
         started_at = perf_counter()
         plans = await self._search_plans(query)
-        return RouteSearchResponse(
-            query_id=f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
-            source=self.source,
-            updated_at=datetime.now(timezone.utc),
-            elapsed_ms=max(0, round((perf_counter() - started_at) * 1000)),
-            plans=plans,
-        )
-
-    async def stream_snapshots(self, query: RouteQuery) -> AsyncIterator[StreamSnapshot]:
-        response = await self.search(query)
         yield {
             "type": "snapshot",
-            "query_id": response.query_id,
-            "source": response.source,
-            "updated_at": response.updated_at,
-            "plans": response.plans,
+            "query_id": f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
+            "source": self.source,
+            "updated_at": datetime.now(timezone.utc),
+            "elapsed_ms": max(0, round((perf_counter() - started_at) * 1000)),
+            "plans": plans,
             "searched_count": 0,
             "pending_count": 0,
             "remote_query_count": 0,

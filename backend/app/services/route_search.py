@@ -8,11 +8,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from time import perf_counter
 from typing import NotRequired, TypedDict
 
 from app.adapters.base import TrainDataProvider, TrainDataProviderError
-from app.domain.models import RouteQuery, RouteSearchResponse, TrainSegment, TransferPlan
+from app.domain.models import RouteQuery, TrainSegment, TransferPlan
 from app.services.cache import SqliteOdCache, TtlCache
 from app.services.search_telemetry import SqliteSearchTelemetryRecorder
 
@@ -124,7 +123,7 @@ class CheapestPathSearcher:
     def __init__(self, route_search: "ProviderBackedRouteSearchEngine") -> None:
         self.route_search = route_search
 
-    async def search(self, query: RouteQuery, context: SearchContext) -> list[TransferPlan]:
+    async def search_plans(self, query: RouteQuery, context: SearchContext) -> list[TransferPlan]:
         candidates = self._ranked_transfer_candidates(query)
         best_price: Decimal | None = None
         plans: list[TransferPlan] = []
@@ -262,38 +261,6 @@ class ProviderBackedRouteSearchEngine:
             "last_diagnostics": self.last_diagnostics.as_dict(),
         }
 
-    async def search(self, query: RouteQuery) -> RouteSearchResponse:
-        started_at = perf_counter()
-        context = SearchContext()
-        plans = [plan async for plan in self._iter_plans(query, context)]
-        plans = self._deduplicate_plans(plans)
-        plans.sort(key=self._plan_sort_key)
-        plans = plans[:MAX_RETURNED_PLANS]
-        await self._finish_search(query, plans, context)
-
-        return RouteSearchResponse(
-            query_id=f"{query.date.isoformat()}:{query.from_station}:{query.to_station}",
-            source=self.provider.name,
-            updated_at=datetime.now(timezone.utc),
-            elapsed_ms=max(0, round((perf_counter() - started_at) * 1000)),
-            plans=plans,
-        )
-
-    async def stream(self, query: RouteQuery) -> AsyncIterator[TransferPlan]:
-        context = SearchContext()
-        emitted: list[TransferPlan] = []
-        emitted_keys: set[tuple[tuple[str, str, str, datetime, datetime], ...]] = set()
-        async for plan in self._iter_plans(query, context):
-            plan_key = self._plan_identity_key(plan)
-            if plan_key in emitted_keys:
-                continue
-            emitted_keys.add(plan_key)
-            emitted.append(plan)
-            emitted.sort(key=self._plan_sort_key)
-            if plan in emitted[:MAX_RETURNED_PLANS]:
-                yield plan
-        await self._finish_search(query, emitted[:MAX_RETURNED_PLANS], context)
-
     async def stream_snapshots(self, query: RouteQuery) -> AsyncIterator[StreamSnapshot]:
         context = SearchContext()
         plans: list[TransferPlan] = []
@@ -322,7 +289,7 @@ class ProviderBackedRouteSearchEngine:
 
     async def _iter_plans(self, query: RouteQuery, context: SearchContext) -> AsyncIterator[TransferPlan]:
         if query.max_transfers >= 2:
-            for plan in await self.cheapest_path_searcher.search(query, context):
+            for plan in await self.cheapest_path_searcher.search_plans(query, context):
                 yield plan
             return
 
