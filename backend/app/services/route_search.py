@@ -1,10 +1,8 @@
 import asyncio
 import heapq
-import json
 import os
 from bisect import bisect_left
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -13,85 +11,25 @@ from app.adapters.base import TrainDataProvider, TrainDataProviderError
 from app.domain.models import RouteQuery, TrainSegment, TransferPlan
 from app.services.cache import SqliteOdCache, TtlCache
 from app.services.route_search_engine import StreamSnapshot
+from app.services.route_search_models import (
+    OnlineSearchContext,
+    OnlineSearchParetoFrontier,
+    OnlineSearchState,
+    SearchDiagnostics,
+)
+from app.services.route_search_plans import (
+    build_plan,
+    deduplicate_plans,
+    plan_identity_key,
+    plan_sort_key,
+    plan_within_duration_limit,
+    transfer_wait_comfort_penalty,
+)
+from app.services.route_search_serializers import deserialize_train_segments, serialize_train_segments
 from app.services.search_telemetry import SqliteSearchTelemetryRecorder
 
 
 MAX_RETURNED_PLANS = 10
-COMFORTABLE_MIN_TRANSFER_MINUTES = 30
-COMFORTABLE_MAX_TRANSFER_MINUTES = 120
-
-
-@dataclass
-class SearchDiagnostics:
-    remote_query_count: int = 0
-    memory_cache_hit_count: int = 0
-    persistent_cache_hit_count: int = 0
-    expanded_od_targets: list[str] = field(default_factory=list)
-    failed_od_targets: list[str] = field(default_factory=list)
-    pruned_by_complete_price_bound_count: int = 0
-    pruned_by_pareto_count: int = 0
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            "remote_query_count": self.remote_query_count,
-            "memory_cache_hit_count": self.memory_cache_hit_count,
-            "persistent_cache_hit_count": self.persistent_cache_hit_count,
-            "expanded_od_targets": self.expanded_od_targets,
-            "failed_od_targets": self.failed_od_targets,
-            "pruned_by_complete_price_bound_count": self.pruned_by_complete_price_bound_count,
-            "pruned_by_pareto_count": self.pruned_by_pareto_count,
-        }
-
-
-class OnlineSearchContext:
-    def __init__(self) -> None:
-        self.remote_query_count = 0
-        self.diagnostics = SearchDiagnostics()
-        self.remote_query_lock = asyncio.Lock()
-
-
-@dataclass(frozen=True)
-class OnlineSearchState:
-    current_station: str
-    segments: tuple[TrainSegment, ...]
-    accumulated_price: Decimal
-    arrive_at: datetime | None
-    visited_stations: frozenset[str]
-
-    @property
-    def transfer_count(self) -> int:
-        return max(0, len(self.segments) - 1)
-
-
-@dataclass(frozen=True)
-class FrontierEntry:
-    price: Decimal
-    arrive_at: datetime
-
-
-class OnlineSearchParetoFrontier:
-    def __init__(self) -> None:
-        self._entries: dict[tuple[str, int], list[FrontierEntry]] = {}
-
-    def add_if_not_dominated(self, state: OnlineSearchState) -> bool:
-        if state.arrive_at is None:
-            return True
-
-        key = (state.current_station, state.transfer_count)
-        entries = self._entries.setdefault(key, [])
-        for entry in entries:
-            if entry.price <= state.accumulated_price and entry.arrive_at <= state.arrive_at:
-                return False
-
-        entries[:] = [
-            entry
-            for entry in entries
-            if not (state.accumulated_price <= entry.price and state.arrive_at <= entry.arrive_at)
-        ]
-        entries.append(FrontierEntry(price=state.accumulated_price, arrive_at=state.arrive_at))
-        return True
-
-
 class OnlineRouteSearchEngine:
     def __init__(
         self,
@@ -342,40 +280,16 @@ class OnlineRouteSearchEngine:
         )
 
     def _plan_sort_key(self, plan: TransferPlan) -> tuple[Decimal, int, int, int]:
-        return (
-            plan.total_price,
-            self._transfer_wait_comfort_penalty(plan),
-            len(plan.transfer_stations),
-            plan.total_duration_minutes,
-        )
+        return plan_sort_key(plan)
 
     def _plan_within_duration_limit(self, plan: TransferPlan, query: RouteQuery) -> bool:
-        if query.max_total_duration_minutes is None:
-            return True
-        return plan.total_duration_minutes <= query.max_total_duration_minutes
+        return plan_within_duration_limit(plan, query)
 
     def _deduplicate_plans(self, plans: list[TransferPlan]) -> list[TransferPlan]:
-        unique_plans: list[TransferPlan] = []
-        seen: set[tuple[tuple[str, str, str, datetime, datetime], ...]] = set()
-        for plan in plans:
-            plan_key = self._plan_identity_key(plan)
-            if plan_key in seen:
-                continue
-            seen.add(plan_key)
-            unique_plans.append(plan)
-        return unique_plans
+        return deduplicate_plans(plans)
 
     def _plan_identity_key(self, plan: TransferPlan) -> tuple[tuple[str, str, str, datetime, datetime], ...]:
-        return tuple(
-            (
-                segment.train_no,
-                segment.from_station,
-                segment.to_station,
-                segment.depart_at,
-                segment.arrive_at,
-            )
-            for segment in plan.segments
-        )
+        return plan_identity_key(plan)
 
     def _build_stream_snapshot(
         self,
@@ -398,27 +312,10 @@ class OnlineRouteSearchEngine:
         }
 
     def _transfer_wait_comfort_penalty(self, plan: TransferPlan) -> int:
-        penalty = 0
-        for previous, current in zip(plan.segments, plan.segments[1:]):
-            wait_minutes = max(0, int((current.depart_at - previous.arrive_at).total_seconds() // 60))
-            if wait_minutes < COMFORTABLE_MIN_TRANSFER_MINUTES:
-                penalty += (COMFORTABLE_MIN_TRANSFER_MINUTES - wait_minutes) * 10
-            elif wait_minutes > COMFORTABLE_MAX_TRANSFER_MINUTES:
-                penalty += wait_minutes - COMFORTABLE_MAX_TRANSFER_MINUTES
-        return penalty
+        return transfer_wait_comfort_penalty(plan)
 
     def _build_plan(self, segments: list[TrainSegment]) -> TransferPlan:
-        total_price = sum([segment.lowest_price or Decimal("0") for segment in segments], Decimal("0"))
-        total_duration = max(0, int((segments[-1].arrive_at - segments[0].depart_at).total_seconds() // 60))
-        ride_minutes = sum(segment.duration_minutes for segment in segments)
-        transfer_stations = [segment.to_station for segment in segments[:-1]]
-        return TransferPlan(
-            total_price=total_price,
-            total_duration_minutes=total_duration,
-            transfer_minutes=max(0, total_duration - ride_minutes),
-            transfer_stations=transfer_stations,
-            segments=segments,
-        )
+        return build_plan(segments)
 
     def _segment_cache_key(self, from_station: str, to_station: str, query: RouteQuery) -> str:
         return ":".join(
@@ -476,14 +373,3 @@ class OnlineRouteSearchEngine:
     def _record_failed_candidate(self, context: OnlineSearchContext, station: str) -> None:
         if station not in context.diagnostics.failed_od_targets:
             context.diagnostics.failed_od_targets.append(station)
-
-
-def serialize_train_segments(segments: list[TrainSegment]) -> str:
-    return json.dumps([segment.model_dump(mode="json") for segment in segments], ensure_ascii=False)
-
-
-def deserialize_train_segments(value: str) -> list[TrainSegment]:
-    payload = json.loads(value)
-    if not isinstance(payload, list):
-        raise ValueError("cached train segments must be a list")
-    return [TrainSegment.model_validate(item) for item in payload]
