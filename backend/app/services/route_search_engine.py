@@ -1,8 +1,20 @@
 from collections.abc import AsyncIterator
-from typing import Protocol
+from datetime import datetime
+from typing import NotRequired, Protocol, TypedDict
 
-from app.domain.models import RouteQuery
-from app.services.route_search import StreamSnapshot
+from app.domain.models import RouteQuery, TransferPlan
+
+
+class StreamSnapshot(TypedDict):
+    type: str
+    query_id: str
+    source: str
+    updated_at: datetime
+    plans: list[TransferPlan]
+    searched_count: int
+    pending_count: int
+    remote_query_count: int
+    final: NotRequired[bool]
 
 
 class RouteSearchEngine(Protocol):

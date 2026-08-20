@@ -13,20 +13,20 @@
 
 仓库根目录提供了 `.env.example`，可以复制为 `.env` 后按需修改。当前项目实际使用到的环境变量如下：
 
-| 变量                              | 默认值                               | 说明                                                                                                             |
-| --------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
-| `TRAIN_DATA_PROVIDER`             | `mock`                               | 后端数据源。可选 `mock`、`12306-public-price`、`static-price`。                                                  |
-| `STATIC_PRICE_DB`                 | `./data/static_prices.sqlite3`       | 当 `TRAIN_DATA_PROVIDER=static-price` 时必填，本地静态票价库路径。                                               |
-| `STATIC_PRICE_MODE`               | `static-only`                        | 静态票价库模式。可选 `static-only`、`local-only`、`static-with-remote-fallback`、`remote-fallback`、`fallback`。 |
-| `STATIC_PRICE_FALLBACK_PROVIDER`  | `12306-public-price`                 | `STATIC_PRICE_MODE` 需要远程回填时使用的数据源。                                                                 |
-| `STATIC_PRICE_MAX_AGE_DAYS`       | 空                                   | 静态票价最大可接受年龄（天）；空值表示不限制。                                                                   |
-| `ROUTE_SEARCH_ENGINE`             | `candidate`                          | 路线搜索引擎。可选 `candidate`、`time-expanded`。                                                                |
-| `TIME_EXPANDED_GRAPH_DB`          | `./data/static_prices.sqlite3`       | 当 `ROUTE_SEARCH_ENGINE=time-expanded` 时必填；优先于 `STATIC_PRICE_DB`。                                        |
-| `TIME_EXPANDED_GRAPH_PROVIDER`    | `12306-public-price`                 | `time-expanded` 模式下读取的来源标识。                                                                           |
-| `ROUTE_SEGMENT_CACHE_DB`          | `./data/route_segment_cache.sqlite3` | 可选，本地中转段缓存 SQLite 路径。                                                                               |
-| `ROUTE_SEGMENT_CACHE_TTL_SECONDS` | 启动参数默认值                       | 可选，中转段缓存 TTL（秒）。                                                                                     |
-| `SEARCH_TELEMETRY_DB`             | `./data/search_telemetry.sqlite3`    | 可选，搜索遥测 SQLite 路径。                                                                                     |
-| `VITE_API_BASE_URL`               | `http://localhost:8000`              | 前端调用后端 API 的基础地址。                                                                                    |
+| 变量                                   | 默认值                               | 说明                                                                                                             |
+| -------------------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `TRAIN_DATA_PROVIDER`                  | `mock`                               | 后端数据源。可选 `mock`、`12306-public-price`、`static-price`。                                                  |
+| `STATIC_PRICE_DB`                      | `./data/static_prices.sqlite3`       | 当 `TRAIN_DATA_PROVIDER=static-price` 时必填，本地静态票价库路径。                                               |
+| `STATIC_PRICE_MODE`                    | `static-only`                        | 静态票价库模式。可选 `static-only`、`local-only`、`static-with-remote-fallback`、`remote-fallback`、`fallback`。 |
+| `STATIC_PRICE_FALLBACK_PROVIDER`       | `12306-public-price`                 | `STATIC_PRICE_MODE` 需要远程回填时使用的数据源。                                                                 |
+| `STATIC_PRICE_MAX_AGE_DAYS`            | 空                                   | 静态票价最大可接受年龄（天）；空值表示不限制。                                                                   |
+| `ROUTE_SEARCH_ENGINE`                  | `online`                             | 路线搜索引擎。正式值为 `online`、`time-expanded`；`candidate` 等历史值仅作为在线引擎兼容别名。                    |
+| `TIME_EXPANDED_GRAPH_DB`               | `./data/static_prices.sqlite3`       | 当 `ROUTE_SEARCH_ENGINE=time-expanded` 时必填；优先于 `STATIC_PRICE_DB`。                                        |
+| `TIME_EXPANDED_GRAPH_PROVIDER`         | `12306-public-price`                 | `time-expanded` 模式下读取的来源标识。                                                                           |
+| `ROUTE_SEGMENT_CACHE_DB`               | `./data/route_segment_cache.sqlite3` | 可选，本地中转段缓存 SQLite 路径。                                                                               |
+| `ROUTE_SEGMENT_CACHE_TTL_SECONDS`      | 启动参数默认值                       | 可选，中转段缓存 TTL（秒）。                                                                                     |
+| `SEARCH_TELEMETRY_DB`                  | `./data/search_telemetry.sqlite3`    | 可选，搜索遥测 SQLite 路径。                                                                                     |
+| `VITE_API_BASE_URL`                    | `http://localhost:8000`              | 前端调用后端 API 的基础地址。                                                                                    |
 
 ## 目录
 
@@ -70,14 +70,16 @@ $env:SEARCH_TELEMETRY_DB = ".\data\search_telemetry.sqlite3"
 
 ### 搜索引擎切换
 
-后端路线搜索通过 `ROUTE_SEARCH_ENGINE` 选择搜索架构。未设置时默认使用旧候选中转站 OD 搜索，保持既有行为。
+后端路线搜索通过 `ROUTE_SEARCH_ENGINE` 选择搜索架构。未设置时默认使用 `online` 在线 OD 搜索。
 
-候选中转站 OD 搜索（默认）：
+在线 OD 搜索（默认）：
 
 ```powershell
-$env:ROUTE_SEARCH_ENGINE = "candidate"
+$env:ROUTE_SEARCH_ENGINE = "online"
 uvicorn app.main:app --reload --port 8000
 ```
+
+`online` 使用统一优先队列覆盖直达、一换和二换，`max_transfers` 只限制路径扩展。边数据通过 `TrainDataProvider.search_segments()` 懒加载，并受候选站策略、缓存和远程请求预算限制，因此不等同于全国完整铁路图搜索，也不承诺完整图意义上的全局最优。`candidate`、`od-candidate`、`legacy` 等名称只为兼容既有环境变量。
 
 本地时间扩展图搜索：
 
@@ -88,7 +90,7 @@ $env:TIME_EXPANDED_GRAPH_PROVIDER = "12306-public-price"
 uvicorn app.main:app --reload --port 8000
 ```
 
-`time-expanded` 在线搜索只读本地 SQLite 的时间扩展图快照表，不触发 12306 远程 fallback，也不调用 `TrainDataProvider.search_segments()`。本地数据缺失时返回无方案；覆盖不足需要通过静态库诊断和后续离线刷新流程处理。静态公布票价不等于实时有票，当前时间扩展图也不宣称具备全国完整覆盖。
+`time-expanded` 查询只读本地 SQLite 的时间扩展图快照表，不触发 12306 远程 fallback，也不调用 `TrainDataProvider.search_segments()`。本地数据缺失时返回无方案；覆盖不足需要通过静态库诊断和后续离线刷新流程处理。静态公布票价不等于实时有票，当前时间扩展图也不宣称具备全国完整覆盖。
 
 全量快照爬取基础边：
 

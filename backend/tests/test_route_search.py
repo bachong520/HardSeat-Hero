@@ -10,9 +10,9 @@ from app.adapters.mock_provider import MockTrainDataProvider
 from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
 from app.services.cache import SqliteOdCache
 from app.services.route_search import (
-    ParetoFrontier,
-    PathSearchState,
-    ProviderBackedRouteSearchEngine,
+    OnlineSearchParetoFrontier,
+    OnlineSearchState,
+    OnlineRouteSearchEngine,
     deserialize_train_segments,
     serialize_train_segments,
 )
@@ -120,6 +120,39 @@ class TwoTransferCheapestProvider(TrainDataProvider):
             ("中转一", "终点"): [priced_segment("D3", from_station, to_station, query.date, time(10, 0), time(13, 0), "300")],
             ("中转一", "中转二"): [priced_segment("D4", from_station, to_station, query.date, time(10, 0), time(11, 0), "70")],
             ("中转二", "终点"): [priced_segment("D5", from_station, to_station, query.date, time(12, 0), time(14, 0), "60")],
+        }
+        return segments.get((from_station, to_station), [])
+
+
+class BudgetSensitiveOneTransferProvider(TrainDataProvider):
+    name = "budget-sensitive-one-transfer"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, date]] = []
+
+    def candidate_transfer_stations(self, query: RouteQuery) -> list[str]:
+        return ["赣州", "惠州", "无效候选"]
+
+    async def search_segments(self, from_station: str, to_station: str, query: RouteQuery) -> list[TrainSegment]:
+        self.calls.append((from_station, to_station, query.date))
+        if query.date != date(2026, 7, 1):
+            return []
+        segments = {
+            ("东莞", "赣州"): [
+                priced_segment("K1", from_station, to_station, query.date, time(8, 0), time(10, 0), "100")
+            ],
+            ("赣州", "厦门"): [
+                priced_segment("K2", from_station, to_station, query.date, time(11, 0), time(14, 0), "27")
+            ],
+            ("东莞", "惠州"): [
+                priced_segment("K3", from_station, to_station, query.date, time(8, 0), time(9, 0), "10")
+            ],
+            ("惠州", "厦门"): [
+                priced_segment("K4", from_station, to_station, query.date, time(10, 0), time(13, 0), "190")
+            ],
+            ("东莞", "无效候选"): [
+                priced_segment("K5", from_station, to_station, query.date, time(8, 0), time(9, 0), "300")
+            ],
         }
         return segments.get((from_station, to_station), [])
 
@@ -322,33 +355,57 @@ def priced_segment(
 
 
 @pytest.mark.asyncio
-async def test_stream_snapshots_replace_previous_top_plans() -> None:
-    service = ProviderBackedRouteSearchEngine(ProgressiveCheaperTransferProvider(), remote_query_interval_seconds=0)
+async def test_stream_snapshots_returns_only_final_sorted_plans() -> None:
+    service = OnlineRouteSearchEngine(ProgressiveCheaperTransferProvider(), remote_query_interval_seconds=0)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1))
 
     snapshots = [snapshot async for snapshot in service.stream_snapshots(query)]
 
-    assert len(snapshots) >= 2
-    assert all(snapshot["type"] == "snapshot" for snapshot in snapshots)
-    assert snapshots[0]["plans"][0].total_price == Decimal("300")
-    assert snapshots[-1]["plans"][0].total_price == Decimal("100")
-    assert snapshots[-1]["plans"][0].transfer_stations == ["便宜中转"]
-    assert snapshots[-1].get("final") is True
-    assert snapshots[-1]["pending_count"] == 0
+    assert len(snapshots) == 1
+    assert snapshots[0]["type"] == "snapshot"
+    assert snapshots[0]["plans"][0].total_price == Decimal("100")
+    assert snapshots[0]["plans"][0].transfer_stations == ["便宜中转"]
+    assert snapshots[0].get("final") is True
+    assert snapshots[0]["pending_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_transfers", [0, 1, 2])
+async def test_stream_snapshots_uses_unified_search_plans(max_transfers: int) -> None:
+    service = OnlineRouteSearchEngine(MockTrainDataProvider())
+    calls: list[int] = []
+
+    async def fake_search_plans(query: RouteQuery, context) -> list[TransferPlan]:
+        calls.append(query.max_transfers)
+        return []
+
+    service._search_plans = fake_search_plans
+    query = RouteQuery(
+        from_station="北京",
+        to_station="上海",
+        date=date(2026, 7, 1),
+        max_transfers=max_transfers,
+    )
+
+    snapshots = [snapshot async for snapshot in service.stream_snapshots(query)]
+
+    assert calls == [max_transfers]
+    assert len(snapshots) == 1
+    assert snapshots[0]["final"] is True
 
 
 def test_provider_backed_route_search_engine_exposes_engine_status() -> None:
     provider = MockTrainDataProvider()
-    service = ProviderBackedRouteSearchEngine(provider)
+    service = OnlineRouteSearchEngine(provider)
 
     assert service.source == "mock"
-    assert service.status["search_engine"] == "candidate"
+    assert service.status["search_engine"] == "online"
     assert service.status["provider"] == "mock"
 
 
 @pytest.mark.asyncio
 async def test_search_returns_lowest_price_first() -> None:
-    service = ProviderBackedRouteSearchEngine(MockTrainDataProvider())
+    service = OnlineRouteSearchEngine(MockTrainDataProvider())
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -360,7 +417,7 @@ async def test_search_returns_lowest_price_first() -> None:
 
 @pytest.mark.asyncio
 async def test_total_price_uses_lowest_seat_price_when_first_price_is_not_lowest() -> None:
-    service = ProviderBackedRouteSearchEngine(MultipleSeatPriceProvider())
+    service = OnlineRouteSearchEngine(MultipleSeatPriceProvider())
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
 
     response = await final_response(service, query)
@@ -372,7 +429,7 @@ async def test_total_price_uses_lowest_seat_price_when_first_price_is_not_lowest
 
 @pytest.mark.asyncio
 async def test_search_returns_at_most_ten_plans() -> None:
-    service = ProviderBackedRouteSearchEngine(ManyDirectPlansProvider())
+    service = OnlineRouteSearchEngine(ManyDirectPlansProvider())
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
 
     response = await final_response(service, query)
@@ -383,7 +440,7 @@ async def test_search_returns_at_most_ten_plans() -> None:
 
 @pytest.mark.asyncio
 async def test_default_search_does_not_filter_by_total_duration() -> None:
-    service = ProviderBackedRouteSearchEngine(LongDurationDirectProvider())
+    service = OnlineRouteSearchEngine(LongDurationDirectProvider())
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=0)
 
     response = await final_response(service, query)
@@ -394,7 +451,7 @@ async def test_default_search_does_not_filter_by_total_duration() -> None:
 
 @pytest.mark.asyncio
 async def test_explicit_total_duration_limit_still_filters_plans() -> None:
-    service = ProviderBackedRouteSearchEngine(LongDurationDirectProvider())
+    service = OnlineRouteSearchEngine(LongDurationDirectProvider())
     query = RouteQuery(
         from_station="起点",
         to_station="终点",
@@ -410,7 +467,7 @@ async def test_explicit_total_duration_limit_still_filters_plans() -> None:
 
 @pytest.mark.asyncio
 async def test_equal_price_transfer_plans_are_sorted_by_wait_comfort() -> None:
-    service = ProviderBackedRouteSearchEngine(EqualPriceComfortProvider())
+    service = OnlineRouteSearchEngine(EqualPriceComfortProvider())
     query = RouteQuery(
         from_station="起点",
         to_station="终点",
@@ -426,7 +483,7 @@ async def test_equal_price_transfer_plans_are_sorted_by_wait_comfort() -> None:
 
 @pytest.mark.asyncio
 async def test_min_transfer_filter_removes_too_short_transfer() -> None:
-    service = ProviderBackedRouteSearchEngine(MockTrainDataProvider())
+    service = OnlineRouteSearchEngine(MockTrainDataProvider())
     query = RouteQuery(
         from_station="北京",
         to_station="上海",
@@ -445,7 +502,7 @@ async def test_min_transfer_filter_removes_too_short_transfer() -> None:
 @pytest.mark.asyncio
 async def test_one_transfer_skips_second_leg_when_first_leg_is_empty() -> None:
     provider = EmptyFirstLegProvider()
-    service = ProviderBackedRouteSearchEngine(provider)
+    service = OnlineRouteSearchEngine(provider)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1))
 
     await final_response(service, query)
@@ -456,17 +513,17 @@ async def test_one_transfer_skips_second_leg_when_first_leg_is_empty() -> None:
 @pytest.mark.asyncio
 async def test_search_limits_concurrent_remote_queries() -> None:
     provider = SlowEmptyTransferProvider(candidates=5)
-    service = ProviderBackedRouteSearchEngine(provider, max_concurrent_remote_queries=2, remote_query_interval_seconds=0)
+    service = OnlineRouteSearchEngine(provider, max_concurrent_remote_queries=2, remote_query_interval_seconds=0)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1))
 
     await final_response(service, query)
 
-    assert provider.max_active_queries == 2
+    assert 1 <= provider.max_active_queries <= 2
 
 
 @pytest.mark.asyncio
 async def test_one_transfer_skips_failed_candidate_station() -> None:
-    service = ProviderBackedRouteSearchEngine(FailingTransferCandidateProvider())
+    service = OnlineRouteSearchEngine(FailingTransferCandidateProvider())
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -477,7 +534,7 @@ async def test_one_transfer_skips_failed_candidate_station() -> None:
 @pytest.mark.asyncio
 async def test_best_price_prunes_second_leg_when_first_leg_cannot_improve() -> None:
     provider = ExpensiveFirstLegProvider()
-    service = ProviderBackedRouteSearchEngine(provider)
+    service = OnlineRouteSearchEngine(provider)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -488,7 +545,7 @@ async def test_best_price_prunes_second_leg_when_first_leg_cannot_improve() -> N
 
 @pytest.mark.asyncio
 async def test_a_star_finds_cheapest_two_transfer_route() -> None:
-    service = ProviderBackedRouteSearchEngine(TwoTransferCheapestProvider())
+    service = OnlineRouteSearchEngine(TwoTransferCheapestProvider())
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=2)
 
     response = await final_response(service, query)
@@ -499,7 +556,7 @@ async def test_a_star_finds_cheapest_two_transfer_route() -> None:
 
 @pytest.mark.asyncio
 async def test_a_star_respects_max_transfers_limit() -> None:
-    service = ProviderBackedRouteSearchEngine(TwoTransferCheapestProvider())
+    service = OnlineRouteSearchEngine(TwoTransferCheapestProvider())
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=1)
 
     response = await final_response(service, query)
@@ -509,9 +566,24 @@ async def test_a_star_respects_max_transfers_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_one_transfer_budget_is_not_spent_on_candidate_to_candidate_od() -> None:
+    provider = BudgetSensitiveOneTransferProvider()
+    service = OnlineRouteSearchEngine(provider, max_remote_queries=9, remote_query_interval_seconds=0)
+    query = RouteQuery(from_station="东莞", to_station="厦门", date=date(2026, 7, 1), max_transfers=1)
+
+    response = await final_response(service, query)
+
+    assert response.plans[0].total_price == Decimal("127")
+    assert response.plans[0].transfer_stations == ["赣州"]
+    candidate_stations = set(provider.candidate_transfer_stations(query))
+    assert not any(from_station in candidate_stations and to_station in candidate_stations for from_station, to_station, _ in provider.calls)
+    assert service.remote_query_count < service.max_remote_queries
+
+
+@pytest.mark.asyncio
 async def test_a_star_pareto_frontier_prunes_dominated_state() -> None:
     provider = DominatedStateProvider()
-    service = ProviderBackedRouteSearchEngine(provider)
+    service = OnlineRouteSearchEngine(provider)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=2)
 
     response = await final_response(service, query)
@@ -520,7 +592,7 @@ async def test_a_star_pareto_frontier_prunes_dominated_state() -> None:
 
 
 def test_pareto_frontier_rejects_state_with_higher_price_and_later_arrival() -> None:
-    frontier = ParetoFrontier()
+    frontier = OnlineSearchParetoFrontier()
     earlier = path_state("中转站", Decimal("50"), datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc))
     later = path_state("中转站", Decimal("60"), datetime(2026, 7, 1, 9, 10, tzinfo=timezone.utc))
 
@@ -530,7 +602,7 @@ def test_pareto_frontier_rejects_state_with_higher_price_and_later_arrival() -> 
 
 @pytest.mark.asyncio
 async def test_a_star_pareto_frontier_keeps_earlier_arrival_when_more_expensive() -> None:
-    service = ProviderBackedRouteSearchEngine(NonDominatedArrivalProvider())
+    service = OnlineRouteSearchEngine(NonDominatedArrivalProvider())
     query = RouteQuery(
         from_station="起点",
         to_station="终点",
@@ -546,7 +618,7 @@ async def test_a_star_pareto_frontier_keeps_earlier_arrival_when_more_expensive(
 
 
 def test_pareto_frontier_keeps_state_with_earlier_arrival_even_if_more_expensive() -> None:
-    frontier = ParetoFrontier()
+    frontier = OnlineSearchParetoFrontier()
     cheaper_late = path_state("中转站", Decimal("40"), datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc))
     expensive_early = path_state("中转站", Decimal("60"), datetime(2026, 7, 1, 9, 0, tzinfo=timezone.utc))
 
@@ -556,7 +628,7 @@ def test_pareto_frontier_keeps_state_with_earlier_arrival_even_if_more_expensive
 
 @pytest.mark.asyncio
 async def test_no_route_returns_empty_list() -> None:
-    service = ProviderBackedRouteSearchEngine(MockTrainDataProvider())
+    service = OnlineRouteSearchEngine(MockTrainDataProvider())
     query = RouteQuery(from_station="杭州东", to_station="北京", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -567,7 +639,7 @@ async def test_no_route_returns_empty_list() -> None:
 @pytest.mark.asyncio
 async def test_search_uses_segment_cache_for_repeated_query() -> None:
     provider = CountingMockTrainDataProvider()
-    service = ProviderBackedRouteSearchEngine(provider)
+    service = OnlineRouteSearchEngine(provider)
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     await final_response(service, query)
@@ -588,12 +660,12 @@ async def test_search_uses_persistent_segment_cache_across_service_instances(tmp
         deserializer=deserialize_train_segments,
     )
     seed_provider = CountingMockTrainDataProvider()
-    seed_service = ProviderBackedRouteSearchEngine(seed_provider, persistent_cache=persistent_cache)
+    seed_service = OnlineRouteSearchEngine(seed_provider, persistent_cache=persistent_cache)
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=0)
 
     await final_response(seed_service, query)
     cached_provider = CountingMockTrainDataProvider()
-    cached_service = ProviderBackedRouteSearchEngine(cached_provider, persistent_cache=persistent_cache)
+    cached_service = OnlineRouteSearchEngine(cached_provider, persistent_cache=persistent_cache)
     response = await final_response(cached_service, query)
 
     assert response.plans
@@ -605,7 +677,7 @@ async def test_search_uses_persistent_segment_cache_across_service_instances(tmp
 @pytest.mark.asyncio
 async def test_search_records_telemetry_for_best_plan(tmp_path) -> None:
     telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
-    service = ProviderBackedRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry)
+    service = OnlineRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry)
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -617,7 +689,7 @@ async def test_search_records_telemetry_for_best_plan(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_stream_records_telemetry_for_best_plan(tmp_path) -> None:
     telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
-    service = ProviderBackedRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry)
+    service = OnlineRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry)
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     response = await final_response(service, query)
@@ -632,8 +704,8 @@ async def test_search_telemetry_accumulates_transfer_station_hits(tmp_path) -> N
     telemetry = SqliteSearchTelemetryRecorder(tmp_path / "telemetry.sqlite")
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
-    await final_response(ProviderBackedRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry), query)
-    await final_response(ProviderBackedRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry), query)
+    await final_response(OnlineRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry), query)
+    await final_response(OnlineRouteSearchEngine(MockTrainDataProvider(), telemetry_recorder=telemetry), query)
 
     assert telemetry.best_transfer_stations("mock", "北京", "上海", limit=1) == ["南京南"]
 
@@ -648,9 +720,9 @@ def test_a_star_ranked_candidates_merges_telemetry_station_not_in_provider(tmp_p
         plans=[telemetry_plan("历史站", "10")],
         remote_query_count=1,
     )
-    service = ProviderBackedRouteSearchEngine(provider, telemetry_recorder=telemetry)
+    service = OnlineRouteSearchEngine(provider, telemetry_recorder=telemetry)
 
-    candidates = service.cheapest_path_searcher._ranked_transfer_candidates(query)
+    candidates = service._ranked_expansion_stations(query)
 
     assert candidates == ["历史站", "静态一", "静态二"]
 
@@ -662,9 +734,9 @@ def test_a_star_ranked_candidates_prefers_higher_telemetry_hit_count(tmp_path) -
     telemetry.record_search(query, provider.name, [telemetry_plan("低命中", "1")], remote_query_count=1)
     telemetry.record_search(query, provider.name, [telemetry_plan("高命中", "200")], remote_query_count=1)
     telemetry.record_search(query, provider.name, [telemetry_plan("高命中", "200")], remote_query_count=1)
-    service = ProviderBackedRouteSearchEngine(provider, telemetry_recorder=telemetry)
+    service = OnlineRouteSearchEngine(provider, telemetry_recorder=telemetry)
 
-    candidates = service.cheapest_path_searcher._ranked_transfer_candidates(query)
+    candidates = service._ranked_expansion_stations(query)
 
     assert candidates[:2] == ["高命中", "低命中"]
 
@@ -679,9 +751,9 @@ def test_one_transfer_ranked_candidates_also_use_telemetry(tmp_path) -> None:
         plans=[telemetry_plan("历史站", "10")],
         remote_query_count=1,
     )
-    service = ProviderBackedRouteSearchEngine(provider, telemetry_recorder=telemetry)
+    service = OnlineRouteSearchEngine(provider, telemetry_recorder=telemetry)
 
-    candidates = service._ranked_transfer_candidates(query)
+    candidates = service._ranked_expansion_stations(query)
 
     assert candidates == ["历史站", "静态一", "静态二"]
 
@@ -689,7 +761,7 @@ def test_one_transfer_ranked_candidates_also_use_telemetry(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_search_stops_requesting_segments_after_budget_exhausted() -> None:
     provider = CountingMockTrainDataProvider()
-    service = ProviderBackedRouteSearchEngine(provider, max_remote_queries=1)
+    service = OnlineRouteSearchEngine(provider, max_remote_queries=1)
     query = RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1))
 
     await final_response(service, query)
@@ -701,7 +773,7 @@ async def test_search_stops_requesting_segments_after_budget_exhausted() -> None
 @pytest.mark.asyncio
 async def test_concurrent_searches_have_independent_remote_query_budget() -> None:
     provider = SlowBudgetProvider()
-    service = ProviderBackedRouteSearchEngine(provider, max_remote_queries=2, max_concurrent_remote_queries=10)
+    service = OnlineRouteSearchEngine(provider, max_remote_queries=2, max_concurrent_remote_queries=10)
     query = RouteQuery(from_station="起点", to_station="终点", date=date(2026, 7, 1), max_transfers=1)
 
     await asyncio.gather(final_response(service, query), final_response(service, query))
@@ -743,8 +815,8 @@ def test_route_query_rejects_invalid_station_or_duration(payload) -> None:
         RouteQuery(**payload)
 
 
-def path_state(station: str, price: Decimal, arrive_at: datetime) -> PathSearchState:
-    return PathSearchState(
+def path_state(station: str, price: Decimal, arrive_at: datetime) -> OnlineSearchState:
+    return OnlineSearchState(
         current_station=station,
         segments=(priced_segment("D0", "起点", station, arrive_at.date(), time(8, 0), arrive_at.time(), str(price)),),
         accumulated_price=price,

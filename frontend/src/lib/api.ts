@@ -75,6 +75,10 @@ interface RouteSearchMetadata {
 
 export interface ProviderStatusResponse {
   provider: string;
+  search_engine: string;
+  expansion_strategy?: string;
+  online_remote_io: boolean;
+  global_optimum_guaranteed?: boolean;
   status: string;
   transfer_candidate_enabled: boolean;
   max_remote_queries: number;
@@ -88,9 +92,9 @@ export interface SearchDiagnostics {
   remote_query_count: number;
   memory_cache_hit_count: number;
   persistent_cache_hit_count: number;
-  expanded_candidates: string[];
-  failed_candidates: string[];
-  pruned_by_best_price_count: number;
+  expanded_od_targets: string[];
+  failed_od_targets: string[];
+  pruned_by_complete_price_bound_count: number;
   pruned_by_pareto_count: number;
 }
 

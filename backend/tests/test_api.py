@@ -25,7 +25,7 @@ class FailingRouteSearchEngine:
     source = "failing"
     status = {
         "provider": "failing",
-        "search_engine": "candidate",
+        "search_engine": "online",
         "transfer_candidate_enabled": False,
         "max_remote_queries": 0,
         "max_concurrent_remote_queries": 0,
@@ -33,7 +33,9 @@ class FailingRouteSearchEngine:
         "last_diagnostics": {
             "remote_query_count": 0,
             "memory_cache_hit_count": 0,
-            "expanded_candidates": [],
+            "expanded_od_targets": [],
+            "failed_od_targets": [],
+            "pruned_by_complete_price_bound_count": 0,
         },
     }
 
@@ -87,14 +89,16 @@ def test_provider_status_exposes_search_engine_state() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["provider"] == "mock"
-    assert body["search_engine"] == "candidate"
+    assert body["search_engine"] == "online"
+    assert body["expansion_strategy"] == "candidate-station-od"
+    assert body["global_optimum_guaranteed"] is False
     assert body["status"] == "ok"
     assert body["online_remote_io"] is False
     assert body["transfer_candidate_enabled"] is False
     assert body["max_remote_queries"] > 0
     assert body["max_concurrent_remote_queries"] > 0
     assert body["last_diagnostics"]["remote_query_count"] >= 0
-    assert isinstance(body["last_diagnostics"]["expanded_candidates"], list)
+    assert isinstance(body["last_diagnostics"]["expanded_od_targets"], list)
 
 
 def test_provider_status_exposes_last_search_diagnostics() -> None:
@@ -114,7 +118,7 @@ def test_provider_status_exposes_last_search_diagnostics() -> None:
     assert response.status_code == 200
     diagnostics = response.json()["last_diagnostics"]
     assert diagnostics["remote_query_count"] + diagnostics["memory_cache_hit_count"] >= 1
-    assert "南京南" in diagnostics["expanded_candidates"]
+    assert "南京南" in diagnostics["expanded_od_targets"]
 
 
 def test_stream_route_emits_provider_error(monkeypatch) -> None:

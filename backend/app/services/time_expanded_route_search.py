@@ -9,7 +9,7 @@ from decimal import Decimal
 from time import perf_counter
 
 from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
-from app.services.route_search import StreamSnapshot
+from app.services.route_search_engine import StreamSnapshot
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
 
