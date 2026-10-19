@@ -50,7 +50,7 @@ def test_read_od_csv_supports_origin_destination_columns(tmp_path) -> None:
     assert pairs == [OdPair(origin="北京", destination="上海")]
 
 
-def test_read_od_csv_ignores_priority_and_reason_columns(tmp_path) -> None:
+def test_read_od_csv_reads_priority_and_reason_columns(tmp_path) -> None:
     od_file = tmp_path / "refresh_od.csv"
     od_file.write_text(
         "origin,destination,priority,reason\n北京,上海,20,popular_search\n",
@@ -59,7 +59,7 @@ def test_read_od_csv_ignores_priority_and_reason_columns(tmp_path) -> None:
 
     pairs = read_od_csv(od_file)
 
-    assert pairs == [OdPair(origin="北京", destination="上海")]
+    assert pairs == [OdPair(origin="北京", destination="上海", priority=20, reason="popular_search")]
 
 
 @pytest.mark.asyncio

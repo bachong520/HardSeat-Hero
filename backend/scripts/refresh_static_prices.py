@@ -37,6 +37,19 @@ class RefreshSummary:
     failed_count: int
     job_id: int
 
+DEFAULT_TASK_PRIORITY = 100
+
+
+def _parse_priority(raw: str | None) -> int:
+    if raw is None:
+        return DEFAULT_TASK_PRIORITY
+    text = raw.strip()
+    if not text:
+        return DEFAULT_TASK_PRIORITY
+    try:
+        return int(text)
+    except ValueError:
+        return DEFAULT_TASK_PRIORITY
 
 def read_od_csv(path: str | Path) -> list[OdPair]:
     with Path(path).open("r", encoding="utf-8-sig", newline="") as file:
@@ -48,7 +61,14 @@ def read_od_csv(path: str | Path) -> list[OdPair]:
             origin = (row.get("origin") or row.get("from_station") or row.get("from") or "").strip()
             destination = (row.get("destination") or row.get("to_station") or row.get("to") or "").strip()
             if origin and destination:
-                pairs.append(OdPair(origin=origin, destination=destination))
+                pairs.append(
+                    OdPair(
+                        origin=origin,
+                        destination=destination,
+                        priority=_parse_priority(row.get("priority")),
+                        reason=(row.get("reason") or "").strip(),
+                    )
+                )
         return pairs
 
 
