@@ -64,8 +64,8 @@ backend/         FastAPI 服务、领域模型、数据源适配器、中转搜�
   │   ├── adapters/      数据源适配器（Mock、12306、静态票价库）
   │   ├── api/           FastAPI 路由和端点
   │   ├── cloud_crawl/   云函数 worker 和 PostgreSQL repository
-  │   ├── models/        Pydantic 数据模型
-  │   └── search/        路线搜索引擎（online、time-expanded）
+  │   ├── domain/        Pydantic 数据模型
+  │   └── services/      路线搜索引擎（online、time-expanded）
   ├── scripts/   数据爬取、刷新、巡检等脚本工具
   └── tests/     单元测试和集成测试
 frontend/        React 查询页面和结果列表
@@ -82,7 +82,7 @@ data/            种子 OD CSV；运行时 SQLite 数据库默认不提交（在
   └── *.sqlite3             运行时数据库（不提交，本地生成）
 ```
 
-当前完整架构说明见 `docs/项目整体架构.md`。
+当前完整架构说明见 `docs/architecture/项目整体架构.md`。
 
 ## 快速开始
 
