@@ -19,3 +19,7 @@ data/*.db
 data/refresh_od.csv
 data/search_telemetry*.sqlite3
 data/route_segment_cache*.sqlite3
+n.idea/
+.idea/
+backend/pip-*/
+backend/pytest-of-*/
