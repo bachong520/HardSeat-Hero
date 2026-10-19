@@ -26,6 +26,8 @@ STATIC_PROVIDER_NAMESPACE = "static-price"
 class OdPair:
     origin: str
     destination: str
+    priority: int = 100
+    reason: str = ""
 
 
 @dataclass(frozen=True)
