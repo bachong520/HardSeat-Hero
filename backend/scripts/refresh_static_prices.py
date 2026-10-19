@@ -81,7 +81,8 @@ async def refresh_static_prices(
     interval_seconds: float = 0,
     limit: int | None = None,
 ) -> RefreshSummary:
-    selected_pairs = od_pairs[:limit] if limit is not None else od_pairs
+    ordered_pairs = sorted(od_pairs, key=lambda pair: pair.priority)
+    selected_pairs = ordered_pairs[:limit] if limit is not None else ordered_pairs
     started_at = datetime.now(timezone.utc)
     job_id = _create_job(repository.db_path, source_provider.name, travel_date, len(selected_pairs), started_at)
     success_count = 0
@@ -158,9 +159,9 @@ def _create_task(db_path: Path, job_id: int, provider: str, travel_date: date, p
             INSERT INTO crawl_task(
                 job_id, provider, travel_date, origin, destination,
                 priority, status, attempts, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 100, 'running', 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'running', 1, ?, ?)
             """,
-            (job_id, provider, travel_date.isoformat(), pair.origin, pair.destination, now, now),
+            (job_id, provider, travel_date.isoformat(), pair.origin, pair.destination, pair.priority, now, now),
         )
         return int(cursor.lastrowid)
 

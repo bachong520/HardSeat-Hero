@@ -136,3 +136,44 @@ async def test_refresh_static_prices_respects_limit(tmp_path) -> None:
 def test_create_source_provider_rejects_unknown_provider() -> None:
     with pytest.raises(ValueError, match="Unsupported refresh source provider"):
         create_source_provider("unknown")
+@pytest.mark.asyncio
+async def test_refresh_static_prices_writes_priority_to_crawl_task(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    provider = FakeRefreshProvider()
+
+    await refresh_static_prices(
+        repository=repository,
+        source_provider=provider,
+        travel_date=date(2026, 7, 1),
+        od_pairs=[
+            OdPair("北京", "上海", priority=20, reason="popular_search"),
+            OdPair("天津", "上海"),
+        ],
+        interval_seconds=0,
+    )
+
+    with sqlite3.connect(repository.db_path) as connection:
+        tasks = connection.execute(
+            "SELECT origin, destination, priority FROM crawl_task ORDER BY id"
+        ).fetchall()
+
+    assert tasks == [("北京", "上海", 20), ("天津", "上海", 100)]
+@pytest.mark.asyncio
+async def test_refresh_static_prices_runs_lower_priority_first(tmp_path) -> None:
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    provider = FakeRefreshProvider()
+
+    await refresh_static_prices(
+        repository=repository,
+        source_provider=provider,
+        travel_date=date(2026, 7, 1),
+        od_pairs=[
+            OdPair("北京", "上海", priority=100),
+            OdPair("广州", "深圳", priority=10),
+            OdPair("天津", "上海", priority=20),
+        ],
+        interval_seconds=0,
+        limit=2,
+    )
+
+    assert provider.calls == [("广州", "深圳"), ("天津", "上海")]
