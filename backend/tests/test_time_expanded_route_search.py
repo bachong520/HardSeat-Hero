@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.domain.models import RouteQuery
+from app.domain.models import RouteQuery, SeatPrice, TrainSegment
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge
 from app.services.time_expanded_route_search import TimeExpandedRouteSearchEngine
 
@@ -235,7 +235,9 @@ async def test_time_expanded_search_reads_train_od_fare_edges(tmp_path) -> None:
     engine = TimeExpandedRouteSearchEngine(repository)
     response = await final_response(engine, RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 12), max_transfers=0))
 
-    assert len(response.plans) == 3
+    # 基础边会被展开成 7-12/7-13/7-14 三份，但首段只接受查询当天出发，
+    # 所以这里只应回来 1 个方案。
+    assert len(response.plans) == 1
     segment = response.plans[0].segments[0]
     assert segment.train_no == "D1"
     assert segment.depart_at == datetime(2026, 7, 12, 8, 0, tzinfo=timezone.utc)
@@ -264,3 +266,70 @@ async def test_time_expanded_search_expands_cross_day_fare_edge(tmp_path) -> Non
     segment = response.plans[0].segments[0]
     assert segment.depart_at == datetime(2026, 7, 12, 22, 0, tzinfo=timezone.utc)
     assert segment.arrive_at == datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_ignores_first_leg_departing_after_query_date(tmp_path) -> None:
+    """首段必须在查询当天出发。
+
+    查 7-1 时，7-2 才发车的车次不能被当成"当天方案"返回；否则同一趟车会被
+    复制成多天的方案占满返回名额，把直达和更多换乘形态挤出前 10。
+    """
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_od_row(
+        repository,
+        service_date=date(2026, 7, 1),
+        train_no="D1",
+        from_station="北京",
+        to_station="上海",
+        depart_at=datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc),
+        price="309.0",
+    )
+    insert_od_row(
+        repository,
+        service_date=date(2026, 7, 2),
+        train_no="D2",
+        from_station="北京",
+        to_station="上海",
+        depart_at=datetime(2026, 7, 2, 8, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 2, 10, 0, tzinfo=timezone.utc),
+        price="309.0",
+    )
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    response = await final_response(
+        engine,
+        RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=0),
+    )
+
+    assert [plan.segments[0].train_no for plan in response.plans] == ["D1"]
+
+
+def build_direct_plan(engine: TimeExpandedRouteSearchEngine, train_no: str, arrive_hour: int):
+    segment = TrainSegment(
+        train_no=train_no,
+        from_station="北京",
+        to_station="上海",
+        depart_at=datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 1, arrive_hour, 0, tzinfo=timezone.utc),
+        duration_minutes=(arrive_hour - 8) * 60,
+        prices=[SeatPrice(seat_type="二等座", price=Decimal("309.0"), remaining="unknown")],
+        source="fixture",
+        updated_at=datetime(2026, 6, 26, 8, 0, tzinfo=timezone.utc),
+    )
+    return engine._build_plan([segment])
+
+
+def test_keep_best_plan_per_train_sequence(tmp_path) -> None:
+    """同一组车次只保留最优的一条，避免同日变体占满返回名额。"""
+    engine = TimeExpandedRouteSearchEngine(SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3"))
+    slow_d1 = build_direct_plan(engine, "D1", 20)
+    fast_d1 = build_direct_plan(engine, "D1", 10)
+    d2 = build_direct_plan(engine, "D2", 12)
+
+    kept = engine._keep_best_plan_per_train_sequence([slow_d1, fast_d1, d2])
+
+    assert sorted(plan.segments[0].train_no for plan in kept) == ["D1", "D2"]
+    kept_d1 = next(plan for plan in kept if plan.segments[0].train_no == "D1")
+    assert kept_d1.total_duration_minutes == 120

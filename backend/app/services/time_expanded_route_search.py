@@ -123,8 +123,24 @@ class TimeExpandedRouteSearchEngine:
                 counter += 1
                 heapq.heappush(queue, (next_price, counter, next_state))
 
+        plans = self._keep_best_plan_per_train_sequence(plans)
         plans.sort(key=self._plan_sort_key)
         return plans[:MAX_RETURNED_PLANS]
+
+    def _keep_best_plan_per_train_sequence(self, plans: list[TransferPlan]) -> list[TransferPlan]:
+        """同一组车次只保留最优的一条。
+
+        因为基础边会按 0/1/2 天偏移展开，同一趟车可能派生出多个变体：
+        当天 9 小时直达的，和"在长沙住一晚再走"的 33 小时方案。它们车次相同、
+        价格相同，却各占一个返回名额，会把直达和更多换乘形态挤出前 10。
+        """
+        best_plans: dict[tuple[str, ...], TransferPlan] = {}
+        for plan in plans:
+            signature = tuple(segment.train_no for segment in plan.segments)
+            current = best_plans.get(signature)
+            if current is None or self._plan_sort_key(plan) < self._plan_sort_key(current):
+                best_plans[signature] = plan
+        return list(best_plans.values())
 
     def _load_edges(self, query: RouteQuery) -> list[TrainOdPriceSnapshot]:
         fare_edges = self.repository.query_train_od_fare_edges(self.provider)
@@ -177,11 +193,10 @@ class TimeExpandedRouteSearchEngine:
 
     def _can_take(self, edge: TrainOdPriceSnapshot, state: TimeExpandedSearchState, query: RouteQuery) -> bool:
         if state.arrive_at is None:
-            return edge.depart_at.date() in {
-                query.date,
-                query.date + timedelta(days=1),
-                query.date + timedelta(days=2),
-            }
+            # 首段必须在查询当天出发。基础边会按 0/1/2 天偏移展开成多份，
+            # 但"用户查哪天"就是"哪天走"，把次日的车次也算进来会让同一趟车
+            # 变出多天方案，占满返回名额。
+            return edge.depart_at.date() == query.date
         earliest_departure = state.arrive_at + timedelta(minutes=query.min_transfer_minutes)
         return edge.depart_at >= earliest_departure
 
