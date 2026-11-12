@@ -333,3 +333,99 @@ def test_keep_best_plan_per_train_sequence(tmp_path) -> None:
     assert sorted(plan.segments[0].train_no for plan in kept) == ["D1", "D2"]
     kept_d1 = next(plan for plan in kept if plan.segments[0].train_no == "D1")
     assert kept_d1.total_duration_minutes == 120
+
+
+def insert_overnight_transfer_fixture(repository: SQLiteStaticPriceRepository) -> None:
+    """D1 上午 10 点到中转站，D2 次日 09 点才发车，换乘要等 23 小时。"""
+    insert_od_row(
+        repository,
+        service_date=date(2026, 7, 1),
+        train_no="D1",
+        from_station="北京",
+        to_station="中转站",
+        depart_at=datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 1, 10, 0, tzinfo=timezone.utc),
+        price="100",
+    )
+    insert_od_row(
+        repository,
+        service_date=date(2026, 7, 2),
+        train_no="D2",
+        from_station="中转站",
+        to_station="上海",
+        depart_at=datetime(2026, 7, 2, 9, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 2, 11, 0, tzinfo=timezone.utc),
+        price="100",
+    )
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_rejects_transfer_wait_beyond_limit(tmp_path) -> None:
+    """默认 12 小时的换乘上限会把"等到次日"的方案挡掉。"""
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_overnight_transfer_fixture(repository)
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    response = await final_response(
+        engine,
+        RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=1),
+    )
+
+    assert response.plans == []
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_accepts_long_wait_when_limit_is_raised(tmp_path) -> None:
+    """把上限放宽到 24 小时后，同一个跨夜方案重新出现。"""
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_overnight_transfer_fixture(repository)
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    response = await final_response(
+        engine,
+        RouteQuery(
+            from_station="北京",
+            to_station="上海",
+            date=date(2026, 7, 1),
+            max_transfers=1,
+            max_transfer_minutes=24 * 60,
+        ),
+    )
+
+    assert len(response.plans) == 1
+    assert [segment.train_no for segment in response.plans[0].segments] == ["D1", "D2"]
+
+
+@pytest.mark.asyncio
+async def test_time_expanded_search_respects_max_total_duration(tmp_path) -> None:
+    """max_total_duration_minutes 在离线引擎里也要生效，不能只在在线引擎生效。"""
+    repository = SQLiteStaticPriceRepository(tmp_path / "static_prices.sqlite3")
+    insert_od_row(
+        repository,
+        service_date=date(2026, 7, 1),
+        train_no="D1",
+        from_station="北京",
+        to_station="上海",
+        depart_at=datetime(2026, 7, 1, 8, 0, tzinfo=timezone.utc),
+        arrive_at=datetime(2026, 7, 1, 20, 0, tzinfo=timezone.utc),
+        price="309.0",
+    )
+
+    engine = TimeExpandedRouteSearchEngine(repository)
+    within_limit = await final_response(
+        engine,
+        RouteQuery(from_station="北京", to_station="上海", date=date(2026, 7, 1), max_transfers=0),
+    )
+    over_limit = await final_response(
+        engine,
+        RouteQuery(
+            from_station="北京",
+            to_station="上海",
+            date=date(2026, 7, 1),
+            max_transfers=0,
+            max_total_duration_minutes=10 * 60,
+        ),
+    )
+
+    assert len(within_limit.plans) == 1
+    assert over_limit.plans == []

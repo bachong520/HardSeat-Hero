@@ -10,6 +10,7 @@ from time import perf_counter
 
 from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
 from app.services.route_search_engine import StreamSnapshot
+from app.services.route_search_plans import plan_within_duration_limit
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
 
@@ -111,7 +112,9 @@ class TimeExpandedRouteSearchEngine:
                     continue
 
                 if edge.to_station == query.to_station:
-                    plans.append(self._build_plan(list(next_segments)))
+                    plan = self._build_plan(list(next_segments))
+                    if plan_within_duration_limit(plan, query):
+                        plans.append(plan)
                     continue
 
                 next_state = TimeExpandedSearchState(
@@ -198,7 +201,10 @@ class TimeExpandedRouteSearchEngine:
             # 变出多天方案，占满返回名额。
             return edge.depart_at.date() == query.date
         earliest_departure = state.arrive_at + timedelta(minutes=query.min_transfer_minutes)
-        return edge.depart_at >= earliest_departure
+        # 换乘等待也有上限：等到次日下午甚至第三天的"方案"虽然便宜，
+        # 实际没人会选，还会把当天可行的方案挤出返回名额。
+        latest_departure = state.arrive_at + timedelta(minutes=query.max_transfer_minutes)
+        return earliest_departure <= edge.depart_at <= latest_departure
 
     def _build_segment(self, edge: TrainOdPriceSnapshot) -> TrainSegment:
         return TrainSegment(

@@ -41,6 +41,7 @@ class RouteQuery(BaseModel):
     date: date
     max_transfers: int = Field(default=1, ge=0, le=2)
     min_transfer_minutes: int = Field(default=30, ge=0, le=360)
+    max_transfer_minutes: int = Field(default=720, ge=30, le=2880)
     max_total_duration_minutes: int | None = Field(default=None, ge=60)
     candidate_limit: int = Field(default=50, ge=1, le=200)
     candidate_strategy: Literal["balanced", "direct_corridor", "wide_detour", "hub_first", "exhaustive_budgeted"] = "balanced"

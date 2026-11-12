@@ -1,7 +1,7 @@
 import asyncio
 import heapq
 import os
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -181,8 +181,11 @@ class OnlineRouteSearchEngine:
         if state.arrive_at is None:
             return segments
         earliest_departure = state.arrive_at + timedelta(minutes=query.min_transfer_minutes)
-        start_index = bisect_left([segment.depart_at for segment in segments], earliest_departure)
-        return segments[start_index:]
+        latest_departure = state.arrive_at + timedelta(minutes=query.max_transfer_minutes)
+        depart_at_list = [segment.depart_at for segment in segments]
+        start_index = bisect_left(depart_at_list, earliest_departure)
+        end_index = bisect_right(depart_at_list, latest_departure)
+        return segments[start_index:end_index]
 
     async def _search_segments(
         self,
