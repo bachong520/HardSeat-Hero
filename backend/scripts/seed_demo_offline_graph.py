@@ -103,7 +103,7 @@ def build_edges() -> list[TrainOdFareEdge]:
     return edges
 
 
-async def run_demo_query(db_path: Path, max_transfers: int, top: int = 6) -> None:
+async def run_demo_query(db_path: Path, max_transfers: int, top: int = 6, max_wait_minutes: int | None = None) -> None:
     """用刚建好的库跑一次查询，确认整条链路是通的。"""
     if top > time_expanded_module.MAX_RETURNED_PLANS:
         # 引擎默认只返回 10 条；想看被截断的部分，就临时把这个上限调大。
@@ -113,11 +113,15 @@ async def run_demo_query(db_path: Path, max_transfers: int, top: int = 6) -> Non
         repository=SQLiteStaticPriceRepository(db_path),
         provider=PROVIDER,
     )
+    query_options = {}
+    if max_wait_minutes is not None:
+        query_options["max_transfer_minutes"] = max_wait_minutes
     query = RouteQuery(
         from_station="广州南",
         to_station="北京西",
         date=date(2026, 11, 20),
         max_transfers=max_transfers,
+        **query_options,
     )
 
     plans = []
@@ -156,6 +160,7 @@ def main() -> None:
     parser.add_argument("--no-demo", action="store_true", help="只建库，不跑演示查询")
     parser.add_argument("--max-transfers", type=int, default=1, help="演示查询的最大换乘次数")
     parser.add_argument("--top", type=int, default=6, help="演示查询打印前几个方案（大于 10 会临时放大引擎上限）")
+    parser.add_argument("--max-wait", type=int, default=None, help="单次换乘的最长等待分钟数（默认用引擎的 720 分钟）")
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -168,7 +173,7 @@ def main() -> None:
     print(f"已写入 {len(edges)} 条基础边 -> {db_path}")
 
     if not args.no_demo:
-        asyncio.run(run_demo_query(db_path, args.max_transfers, args.top))
+        asyncio.run(run_demo_query(db_path, args.max_transfers, args.top, args.max_wait))
 
 
 if __name__ == "__main__":
