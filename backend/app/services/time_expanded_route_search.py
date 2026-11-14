@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import heapq
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from time import perf_counter
 
@@ -69,8 +70,11 @@ class TimeExpandedRouteSearchEngine:
         for row in rows:
             edges_by_station[row.from_station].append(row)
 
-        for edges in edges_by_station.values():
+        departures_by_station: dict[str, list[datetime]] = {}
+        for station, edges in edges_by_station.items():
             edges.sort(key=lambda edge: (edge.depart_at, edge.arrive_at, edge.train_code, edge.seat_type))
+            # 与 edges 下标一一对应的出发时刻表，供二分定位"能赶上的第一班"。
+            departures_by_station[station] = [edge.depart_at for edge in edges]
 
         plans: list[TransferPlan] = []
         queue: list[tuple[Decimal, int, TimeExpandedSearchState]] = []
@@ -83,24 +87,34 @@ class TimeExpandedRouteSearchEngine:
         )
         heapq.heappush(queue, (Decimal("0"), counter, initial_state))
 
-        seen: set[tuple[str, datetime | None, Decimal, tuple[tuple[str, str, str, datetime, datetime], ...]]] = set()
+        # (车站, 到达时刻) -> 已经花掉的最低价。同一站、同一到达时刻，价格更高的
+        # 那条不可能拼出更便宜的后半程，直接剪掉。
+        # 旧实现把"完整路径"放进状态键，等于每换一种车次组合就算一个新状态，
+        # 真实数据下会组合爆炸（北京出站 4744 条边 × 3 天 ≈ 1.4 万个起点）。
+        best_price_per_arrival: dict[tuple[str, datetime], Decimal] = {}
+
+        # 已经收集到的第 10 便宜方案的价格（用负值堆，堆顶就是"最贵的那条"）。
+        # 堆里的价格是随扩展单调不减的：后生成的方案只会更贵，所以一旦队首价格
+        # 已经超过第 10 名，剩下的方案再便宜也挤不进前 10，可以直接收工。
+        # 比较用严格大于，价格相同的方案仍然会被展开，避免改动并列时的排序结果。
+        plan_price_heap: list[Decimal] = []
 
         while queue:
             price, _, state = heapq.heappop(queue)
-            state_key = (
-                state.station,
-                state.arrive_at,
-                state.total_price,
-                tuple(
-                    (segment.train_no, segment.from_station, segment.to_station, segment.depart_at, segment.arrive_at)
-                    for segment in state.segments
-                ),
-            )
-            if state_key in seen:
-                continue
-            seen.add(state_key)
 
-            for edge in edges_by_station.get(state.station, []):
+            if len(plan_price_heap) >= MAX_RETURNED_PLANS and price > -plan_price_heap[0]:
+                break
+
+            if state.arrive_at is not None:
+                slot = (state.station, state.arrive_at)
+                known_price = best_price_per_arrival.get(slot)
+                if known_price is not None and price >= known_price:
+                    continue
+                best_price_per_arrival[slot] = price
+
+            start, end = self._candidate_range(state, query, departures_by_station)
+            for index in range(start, end):
+                edge = edges_by_station[state.station][index]
                 if not self._can_take(edge, state, query):
                     continue
 
@@ -115,6 +129,10 @@ class TimeExpandedRouteSearchEngine:
                     plan = self._build_plan(list(next_segments))
                     if plan_within_duration_limit(plan, query):
                         plans.append(plan)
+                        if len(plan_price_heap) < MAX_RETURNED_PLANS:
+                            heapq.heappush(plan_price_heap, -plan.total_price)
+                        elif plan.total_price < -plan_price_heap[0]:
+                            heapq.heapreplace(plan_price_heap, -plan.total_price)
                     continue
 
                 next_state = TimeExpandedSearchState(
@@ -193,6 +211,32 @@ class TimeExpandedRouteSearchEngine:
                 )
             )
         return materialized
+
+    def _candidate_range(
+        self,
+        state: TimeExpandedSearchState,
+        query: RouteQuery,
+        departures_by_station: dict[str, list[datetime]],
+    ) -> tuple[int, int]:
+        """用二分圈出这一站"能赶上的车"的下标范围，避免每次扫全部出站边。
+
+        出站边已按 depart_at 排序，所以只要把"最早可乘"和"最晚可乘"两个
+        时刻放进 bisect，就能直接拿到切片。`_can_take` 仍会再校验一次，
+        二分只是把候选量从"这一站所有车"降到"时间窗内的车"。
+        """
+        departures = departures_by_station.get(state.station)
+        if not departures:
+            return 0, 0
+
+        if state.arrive_at is None:
+            # 首段只能是查询当天：时间窗就是那一天。
+            earliest = datetime.combine(query.date, time.min, tzinfo=timezone.utc)
+            latest = earliest + timedelta(days=1)
+        else:
+            earliest = state.arrive_at + timedelta(minutes=query.min_transfer_minutes)
+            latest = state.arrive_at + timedelta(minutes=query.max_transfer_minutes)
+
+        return bisect_left(departures, earliest), bisect_right(departures, latest)
 
     def _can_take(self, edge: TrainOdPriceSnapshot, state: TimeExpandedSearchState, query: RouteQuery) -> bool:
         if state.arrive_at is None:
