@@ -53,6 +53,22 @@ def test_create_route_search_engine_supports_offline_aliases(monkeypatch, tmp_pa
     assert engine.status["provider"] == "provider-x"
 
 
+def test_status_payload_keeps_same_keys_across_engines(monkeypatch, tmp_path) -> None:
+    # 两个引擎共用同一个 /api/providers/status 响应契约，字段集合一旦分叉，
+    # 前端就会在缺失字段上读到 undefined（曾经因此整页白屏）。
+    monkeypatch.delenv("ROUTE_SEARCH_ENGINE", raising=False)
+    online_engine = create_route_search_engine(MockTrainDataProvider())
+
+    monkeypatch.setenv("ROUTE_SEARCH_ENGINE", "time-expanded")
+    monkeypatch.setenv("TIME_EXPANDED_GRAPH_DB", str(tmp_path / "time_expanded.sqlite3"))
+    offline_engine = create_route_search_engine(MockTrainDataProvider())
+
+    assert set(offline_engine.status) == set(online_engine.status)
+    assert set(offline_engine.status["last_diagnostics"]) == set(
+        online_engine.status["last_diagnostics"]
+    )
+
+
 def test_create_route_search_engine_time_expanded_requires_db(monkeypatch) -> None:
     monkeypatch.setenv("ROUTE_SEARCH_ENGINE", "time-expanded")
     monkeypatch.delenv("TIME_EXPANDED_GRAPH_DB", raising=False)

@@ -11,6 +11,7 @@ from time import perf_counter
 
 from app.domain.models import RouteQuery, SeatPrice, TrainSegment, TransferPlan
 from app.services.route_search_engine import StreamSnapshot
+from app.services.route_search_models import SearchDiagnostics
 from app.services.route_search_plans import plan_within_duration_limit
 from app.services.static_price_repository import SQLiteStaticPriceRepository, TrainOdFareEdge, TrainOdPriceSnapshot
 
@@ -41,11 +42,21 @@ class TimeExpandedRouteSearchEngine:
 
     @property
     def status(self) -> dict[str, object]:
+        # 字段集合必须和在线引擎保持一致：前端的状态面板按这套契约渲染，
+        # 少一个字段前端就会读到 undefined。离线引擎不发起远程请求，
+        # 所以与远程查询有关的计数一律为 0。
         return {
             "provider": self.provider,
             "search_engine": "time-expanded",
-            "status": "ok",
+            "expansion_strategy": "time-expanded-graph",
             "online_remote_io": False,
+            "global_optimum_guaranteed": False,
+            "status": "ok",
+            "transfer_candidate_enabled": False,
+            "max_remote_queries": 0,
+            "max_concurrent_remote_queries": 0,
+            "last_remote_query_count": 0,
+            "last_diagnostics": SearchDiagnostics().as_dict(),
         }
 
     async def stream_snapshots(self, query: RouteQuery) -> AsyncIterator[StreamSnapshot]:
