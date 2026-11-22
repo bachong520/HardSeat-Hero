@@ -84,7 +84,7 @@ export interface ProviderStatusResponse {
   max_remote_queries: number;
   max_concurrent_remote_queries: number;
   last_remote_query_count: number;
-  last_diagnostics: SearchDiagnostics;
+  last_diagnostics?: SearchDiagnostics;
   updated_at: string;
 }
 

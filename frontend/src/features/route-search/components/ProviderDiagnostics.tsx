@@ -37,22 +37,22 @@ export function ProviderDiagnostics({
       </div>
       <div>
         缓存命中：内存{" "}
-        {providerStatus?.last_diagnostics.memory_cache_hit_count ?? "-"}
+        {providerStatus?.last_diagnostics?.memory_cache_hit_count ?? "-"}
         ；SQLite{" "}
-        {providerStatus?.last_diagnostics.persistent_cache_hit_count ?? "-"}
+        {providerStatus?.last_diagnostics?.persistent_cache_hit_count ?? "-"}
         ；完整方案价格界剪枝{" "}
-        {providerStatus?.last_diagnostics.pruned_by_complete_price_bound_count ?? "-"}
+        {providerStatus?.last_diagnostics?.pruned_by_complete_price_bound_count ?? "-"}
         ；Pareto 剪枝{" "}
-        {providerStatus?.last_diagnostics.pruned_by_pareto_count ?? "-"}
+        {providerStatus?.last_diagnostics?.pruned_by_pareto_count ?? "-"}
       </div>
       <div>
         已扩展 OD 目标：
-        {formatStationList(providerStatus?.last_diagnostics.expanded_od_targets)}
+        {formatStationList(providerStatus?.last_diagnostics?.expanded_od_targets)}
       </div>
-      {providerStatus?.last_diagnostics.failed_od_targets.length ? (
+      {providerStatus?.last_diagnostics?.failed_od_targets?.length ? (
         <div>
           失败 OD 目标：
-          {formatStationList(providerStatus.last_diagnostics.failed_od_targets)}
+          {formatStationList(providerStatus.last_diagnostics?.failed_od_targets)}
         </div>
       ) : null}
     </section>
