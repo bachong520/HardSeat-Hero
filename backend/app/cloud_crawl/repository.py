@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.cloud_crawl.models import (
     ClaimedCloudStationOdTask,
+    CloudCrawlJobStatus,
     CloudDeadLetter,
     CloudStationOdResponse,
     CloudStationOdTask,
@@ -36,6 +37,16 @@ class CloudCrawlRepository(Protocol):
     def reclaim_expired_leases(self, now: datetime) -> int: ...
 
     def release_task(self, task_id: int, lease_token: str) -> bool: ...
+
+    def finalize_job_if_finished(
+        self, job_id: int, *, now: datetime
+    ) -> CloudCrawlJobStatus | None:
+        """这个 job 没有待跑的任务时，把它推到终态并返回终态；否则返回 None。
+
+        云端 worker 每次只被调用一次、跑一批就退，没有谁从头盯到尾，
+        所以"什么时候算跑完"必须由数据自己回答：pending / retry_wait / leased
+        三类任务都清空了，这个 job 就结束了。缺了这一步，job 会永远停在 running。
+        """
 
 
 class InMemoryCloudCrawlRepository:
@@ -208,6 +219,28 @@ class InMemoryCloudCrawlRepository:
         self._clear_lease(task)
         task.updated_at = self._now
         return True
+
+    def finalize_job_if_finished(
+        self, job_id: int, *, now: datetime
+    ) -> CloudCrawlJobStatus | None:
+        """内存实现只回答"这个 job 结束没有"，它没有 job 表可写。"""
+        tasks = [task for task in self._tasks.values() if task.job_id == job_id]
+        if not tasks:
+            return None
+        unfinished = {
+            CloudStationOdTaskStatus.PENDING,
+            CloudStationOdTaskStatus.RETRY_WAIT,
+            CloudStationOdTaskStatus.LEASED,
+        }
+        if any(task.status in unfinished for task in tasks):
+            return None
+        failed = {
+            CloudStationOdTaskStatus.DEAD_LETTER,
+            CloudStationOdTaskStatus.FAILED,
+        }
+        if any(task.status in failed for task in tasks):
+            return CloudCrawlJobStatus.FAILED
+        return CloudCrawlJobStatus.SUCCEEDED
 
     def _leased_task_or_none(self, task_id: int, lease_token: str) -> CloudStationOdTask | None:
         task = self._tasks.get(task_id)

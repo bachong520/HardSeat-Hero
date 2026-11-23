@@ -2,6 +2,7 @@ import asyncio
 from datetime import date, datetime, timezone
 
 from app.cloud_crawl.models import (
+    CloudCrawlJobStatus,
     CloudStationOdTask,
     CloudStationOdTaskDraft,
     CloudStationOdTaskStatus,
@@ -217,3 +218,66 @@ async def test_worker_passes_provider_excerpt_into_response_summary() -> None:
     assert repository.saved_summaries[0].response_excerpt == (
         '{"total_rows":1,"truncated":false,"rows":[{"train_code":"G1"}]}'
     )
+
+
+def test_worker_finalizes_job_when_all_tasks_are_done() -> None:
+    """任务全部到终态后，worker 必须把 job 从 running 推到终态。
+
+    云端 worker 跑完一批就退出，没有这一步 job 会永远停在 running。
+    """
+    repository = make_repository(2)
+
+    summary = asyncio.run(
+        run_cloud_price_worker(make_config(), repository, MockCloudPriceProvider(), now=NOW)
+    )
+
+    assert summary.job_status == CloudCrawlJobStatus.SUCCEEDED
+
+
+def test_worker_keeps_job_running_while_tasks_remain() -> None:
+    """还有任务没跑完时不能收尾，否则 job 会被误判成已完成。"""
+    repository = make_repository(3)
+
+    first = asyncio.run(
+        run_cloud_price_worker(
+            make_config(max_tasks_per_invocation=1), repository, MockCloudPriceProvider(), now=NOW
+        )
+    )
+    assert first.job_status is None
+
+    asyncio.run(
+        run_cloud_price_worker(
+            make_config(max_tasks_per_invocation=10), repository, MockCloudPriceProvider(), now=NOW
+        )
+    )
+
+    final = asyncio.run(
+        run_cloud_price_worker(
+            make_config(max_tasks_per_invocation=10), repository, MockCloudPriceProvider(), now=NOW
+        )
+    )
+    assert final.job_status == CloudCrawlJobStatus.SUCCEEDED
+
+
+def test_worker_marks_job_failed_when_a_task_dead_letters() -> None:
+    """死信任务会让 job 判 failed：宁可显眼，也不要让工具有失败数据时看着像成功。"""
+    repository = make_repository(1, max_attempts=1)
+
+    asyncio.run(
+        run_cloud_price_worker(
+            make_config(),
+            repository,
+            MockCloudPriceProvider(MockProviderMode.RETRYABLE_ERROR),
+            now=NOW,
+        )
+    )
+    summary = asyncio.run(
+        run_cloud_price_worker(
+            make_config(),
+            repository,
+            MockCloudPriceProvider(MockProviderMode.RETRYABLE_ERROR),
+            now=NOW,
+        )
+    )
+
+    assert summary.job_status == CloudCrawlJobStatus.FAILED

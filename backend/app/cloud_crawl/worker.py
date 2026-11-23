@@ -10,6 +10,7 @@ from typing import Protocol
 from app.cloud_crawl.metrics import percentile_latency_ms
 from app.cloud_crawl.models import (
     ClaimedCloudStationOdTask,
+    CloudCrawlJobStatus,
     CloudStationOdTask,
     CloudTaskError,
     CloudTaskResponseSummary,
@@ -62,6 +63,8 @@ class CloudPriceWorkerSummary:
     timeout_count: int = 0
     p50_latency_ms: int = 0
     p95_latency_ms: int = 0
+    # 本次调用结束时这个 job 的终态；还有待跑任务时是 None（job 继续 running）
+    job_status: CloudCrawlJobStatus | None = None
     errors: list[WorkerErrorSummary] = field(default_factory=list)
 
 
@@ -151,6 +154,13 @@ async def run_cloud_price_worker(
     summary.finished_at = datetime.now(timezone.utc)
     summary.p50_latency_ms = percentile_latency_ms(latencies, 50)
     summary.p95_latency_ms = percentile_latency_ms(latencies, 95)
+    # 收尾：所有任务都到终态了就把 job 从 running 推到终态。
+    # 云端 worker 跑完一批就退出，不写这一步 job 会永远停在 running。
+    # dry_run 没动过库，也就不该改 job 状态。
+    if not config.dry_run:
+        summary.job_status = repository.finalize_job_if_finished(
+            config.job_id, now=summary.finished_at
+        )
     return summary
 
 

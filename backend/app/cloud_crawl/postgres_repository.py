@@ -10,6 +10,7 @@ from psycopg.rows import dict_row
 
 from app.cloud_crawl.models import (
     ClaimedCloudStationOdTask,
+    CloudCrawlJobStatus,
     CloudStationOdTask,
     CloudStationOdTaskDraft,
     CloudStationOdTaskStatus,
@@ -360,6 +361,79 @@ class PostgresCloudCrawlRepository:
             )
             conn.commit()
         return cursor.rowcount == 1
+
+    def finalize_job_if_finished(
+        self, job_id: int, *, now: datetime | None = None
+    ) -> CloudCrawlJobStatus | None:
+        """把没有待跑任务的 job 收尾成终态，并顺手把计数字段刷成真实值。
+
+        放在一个事务里：先数状态，再判断，再更新，避免"数完还没判"
+        的间隙里别的 worker 把任务又领走。
+        """
+        current = now or datetime.now(timezone.utc)
+        with self._connect() as conn:
+            with conn.transaction():
+                rows = conn.execute(
+                    """
+                    SELECT status, COUNT(*) AS total
+                    FROM crawl_cloud_station_od_task
+                    WHERE job_id = %s
+                    GROUP BY status
+                    """,
+                    (job_id,),
+                ).fetchall()
+                counts = {str(row["status"]): int(row["total"]) for row in rows}
+                if not counts:
+                    return None
+
+                unfinished = (
+                    counts.get("pending", 0)
+                    + counts.get("retry_wait", 0)
+                    + counts.get("leased", 0)
+                )
+                if unfinished:
+                    return None
+
+                # 有任务进了死信或失败，整个 job 判 failed。宁可显眼也不要
+                # 让"跑了 10000 条、死了 3 条"看起来和全成功一样。
+                failed = counts.get("dead_letter", 0) + counts.get("failed", 0)
+                status = (
+                    CloudCrawlJobStatus.FAILED if failed else CloudCrawlJobStatus.SUCCEEDED
+                )
+                updated = conn.execute(
+                    """
+                    UPDATE crawl_cloud_job
+                    SET status = %s,
+                        total_count = %s,
+                        pending_count = %s,
+                        leased_count = %s,
+                        succeeded_count = %s,
+                        skipped_count = %s,
+                        failed_count = %s,
+                        dead_letter_count = %s,
+                        finished_at = %s,
+                        updated_at = %s
+                    WHERE id = %s
+                      AND status IN ('pending', 'running')
+                    """,
+                    (
+                        str(status),
+                        sum(counts.values()),
+                        counts.get("pending", 0),
+                        counts.get("leased", 0),
+                        counts.get("succeeded", 0),
+                        counts.get("skipped", 0),
+                        counts.get("failed", 0),
+                        counts.get("dead_letter", 0),
+                        current,
+                        current,
+                        job_id,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    # 已经被别人收尾过（或状态是 cancelled），不覆盖
+                    return None
+        return status
 
     def _connect(self) -> psycopg.Connection[Any]:
         return psycopg.connect(self.dsn, row_factory=dict_row)

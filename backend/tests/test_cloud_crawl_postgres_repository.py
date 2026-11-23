@@ -7,6 +7,7 @@ import pytest
 psycopg = pytest.importorskip("psycopg")
 
 from app.cloud_crawl.models import (  # noqa: E402
+    CloudCrawlJobStatus,
     CloudStationOdTaskDraft,
     CloudStationOdTaskStatus,
     CloudTaskError,
@@ -197,3 +198,45 @@ def test_release_task_supports_dry_run(repository: PostgresCloudCrawlRepository)
     stored = repository.get_task(task.id)
     assert stored.status == CloudStationOdTaskStatus.RETRY_WAIT
     assert stored.last_error_type == "dry_run_released"
+
+def test_finalize_job_if_finished_moves_running_job_to_succeeded(
+    repository: PostgresCloudCrawlRepository,
+) -> None:
+    """任务全部成功后，job 必须从 running 收尾成 succeeded 并写入 finished_at。"""
+    job_id = insert_job(repository, status="running")
+    task = repository.insert_task(make_draft(job_id, "北京", "上海"))
+    claimed = repository.claim_tasks(job_id, batch_size=1, worker_id="worker-a", lease_seconds=300)
+    repository.mark_succeeded(
+        claimed[0].task.id,
+        claimed[0].lease_token,
+        CloudTaskResponseSummary(
+            response_hash="hash-1",
+            row_count=3,
+            http_status=200,
+        ),
+    )
+
+    status = repository.finalize_job_if_finished(job_id)
+
+    assert status == CloudCrawlJobStatus.SUCCEEDED
+    with psycopg.connect(TEST_DSN or "") as conn:
+        row = conn.execute(
+            "SELECT status, finished_at, succeeded_count, total_count FROM crawl_cloud_job WHERE id = %s",
+            (job_id,),
+        ).fetchone()
+    assert row[0] == "succeeded"
+    assert row[1] is not None
+    assert row[2] == 1
+    assert row[3] == 1
+    # 再收尾一次不应该改动任何东西（幂等）
+    assert repository.finalize_job_if_finished(job_id) is None
+
+
+def test_finalize_job_if_finished_leaves_job_running_while_tasks_remain(
+    repository: PostgresCloudCrawlRepository,
+) -> None:
+    job_id = insert_job(repository, status="running")
+    repository.insert_task(make_draft(job_id, "北京", "上海"))
+    repository.insert_task(make_draft(job_id, "上海", "杭州"))
+
+    assert repository.finalize_job_if_finished(job_id) is None
