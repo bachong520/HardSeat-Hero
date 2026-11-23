@@ -39,7 +39,46 @@ class Railway12306CloudPriceProvider:
             rows=rows,
             response_hash=hash_public_price_rows(rows),
             http_status=200,
+            response_excerpt=build_response_excerpt(rows),
         )
+
+
+RESPONSE_EXCERPT_MAX_CHARS = 8000
+
+_EXCERPT_ENVELOPE_CHARS = len('{"total_rows":000000,"truncated":false,"rows":[]}') + 1
+
+
+def build_response_excerpt(
+    rows: list[dict[str, Any]],
+    *,
+    max_chars: int = RESPONSE_EXCERPT_MAX_CHARS,
+) -> str | None:
+    """把一次查询的原始行压成可入库的摘要文本。
+
+    返回统一的 JSON 信封：``{"total_rows": 总数, "truncated": 是否截断, "rows": 保留的行}``。
+    用信封而不是裸数组，是为了让读的人一眼看出「这是全部还是前几条」——
+    没有 total_rows 的话，335 行被截成 40 行，和本来就只返回 40 行，长得一模一样。
+    """
+    if not rows:
+        return None
+
+    budget = max(max_chars - _EXCERPT_ENVELOPE_CHARS, 0)
+    kept: list[dict[str, Any]] = []
+    used = 0
+    for row in rows:
+        item_chars = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        extra = item_chars + (1 if kept else 0)  # 行与行之间还有一个逗号
+        if used + extra > budget and kept:
+            break
+        kept.append(row)
+        used += extra
+
+    payload = {
+        "total_rows": len(rows),
+        "truncated": len(kept) < len(rows),
+        "rows": kept,
+    }
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 def hash_public_price_rows(rows: list[dict[str, Any]]) -> str:

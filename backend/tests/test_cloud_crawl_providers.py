@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -5,7 +6,9 @@ import pytest
 from app.adapters.railway_12306_public_price import Railway12306Error
 from app.cloud_crawl.models import CloudStationOdTask
 from app.cloud_crawl.providers import (
+    RESPONSE_EXCERPT_MAX_CHARS,
     Railway12306CloudPriceProvider,
+    build_response_excerpt,
     classify_railway_error,
     hash_public_price_rows,
     is_retryable_railway_error,
@@ -74,3 +77,44 @@ async def test_railway_provider_maps_station_code_missing_to_non_retryable_error
 def test_railway_error_classification(message: str, error_type: str, retryable: bool) -> None:
     assert classify_railway_error(message) == error_type
     assert is_retryable_railway_error(message) is retryable
+
+
+def test_build_response_excerpt_keeps_every_row_when_small() -> None:
+    rows = [{"train_code": "G1"}, {"train_code": "G2"}]
+
+    excerpt = build_response_excerpt(rows)
+
+    assert excerpt is not None
+    payload = json.loads(excerpt)
+    assert payload["total_rows"] == 2
+    assert payload["truncated"] is False
+    assert payload["rows"] == rows
+
+
+def test_build_response_excerpt_truncates_but_keeps_total_rows() -> None:
+    rows = [{"train_code": f"G{index}", "seat": "二等座", "price": "07950"} for index in range(500)]
+
+    excerpt = build_response_excerpt(rows)
+
+    assert excerpt is not None
+    assert len(excerpt) <= RESPONSE_EXCERPT_MAX_CHARS
+    payload = json.loads(excerpt)
+    assert payload["total_rows"] == 500
+    assert payload["truncated"] is True
+    assert 0 < len(payload["rows"]) < 500
+
+
+def test_build_response_excerpt_returns_none_for_empty_rows() -> None:
+    assert build_response_excerpt([]) is None
+
+
+async def test_railway_provider_attaches_response_excerpt() -> None:
+    rows = [{"queryLeftNewDTO": {"station_train_code": "G1", "ze_price": "01000"}}]
+    provider = Railway12306CloudPriceProvider(client=FakePublicPriceClient(rows=rows))
+
+    result = await provider.query_public_price(make_task())
+
+    assert result.response_excerpt is not None
+    payload = json.loads(result.response_excerpt)
+    assert payload["total_rows"] == 1
+    assert payload["truncated"] is False

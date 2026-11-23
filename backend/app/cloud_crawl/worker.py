@@ -70,6 +70,9 @@ class ProviderRowsResult:
     rows: list[dict[str, object]]
     response_hash: str
     http_status: int = 200
+    # 响应摘要：截断后的原始数据，用于阶段 6 的离线合并。
+    # 为空表示 provider 没有提供摘要，此时库里只会留下行数和哈希。
+    response_excerpt: str | None = None
 
 
 class CloudPriceProvider(Protocol):
@@ -195,6 +198,7 @@ async def _process_task(
             response_hash=result.response_hash,
             row_count=len(result.rows),
             http_status=result.http_status,
+            response_excerpt=result.response_excerpt,
         )
         if repository.mark_succeeded(task.id, claimed_task.lease_token, response_summary):
             summary.succeeded_count += 1

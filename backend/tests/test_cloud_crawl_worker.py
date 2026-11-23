@@ -1,7 +1,12 @@
 import asyncio
 from datetime import date, datetime, timezone
 
-from app.cloud_crawl.models import CloudStationOdTask, CloudStationOdTaskDraft, CloudStationOdTaskStatus
+from app.cloud_crawl.models import (
+    CloudStationOdTask,
+    CloudStationOdTaskDraft,
+    CloudStationOdTaskStatus,
+    CloudTaskResponseSummary,
+)
 from app.cloud_crawl.repository import InMemoryCloudCrawlRepository
 from app.cloud_crawl.worker import (
     CloudPriceWorkerConfig,
@@ -171,3 +176,44 @@ async def test_worker_max_tasks_per_invocation_limits_processing() -> None:
     assert summary.processed_count == 3
     assert summary.succeeded_count == 3
     assert repository.get_task(4).status == CloudStationOdTaskStatus.PENDING
+
+
+class RecordingRepository(InMemoryCloudCrawlRepository):
+    """记录每次 mark_succeeded 收到的摘要，用来验证 worker 有没有把摘要透传下去。"""
+
+    def __init__(self) -> None:
+        super().__init__(now=NOW)
+        self.saved_summaries: list[CloudTaskResponseSummary] = []
+
+    def mark_succeeded(self, task_id, lease_token, response_summary):  # type: ignore[no-untyped-def]
+        self.saved_summaries.append(response_summary)
+        return super().mark_succeeded(task_id, lease_token, response_summary)
+
+
+class ExcerptProvider:
+    async def query_public_price(self, task: CloudStationOdTask) -> ProviderRowsResult:
+        return ProviderRowsResult(
+            rows=[{"train_code": "G1"}],
+            response_hash=f"excerpt:{task.id}",
+            response_excerpt='{"total_rows":1,"truncated":false,"rows":[{"train_code":"G1"}]}',
+        )
+
+
+async def test_worker_passes_provider_excerpt_into_response_summary() -> None:
+    repository = RecordingRepository()
+    repository.insert_task(
+        CloudStationOdTaskDraft(
+            job_id=1,
+            provider="mock-cloud-price",
+            crawl_date=date(2026, 7, 12),
+            from_station="北京",
+            to_station="上海",
+        )
+    )
+
+    await run_cloud_price_worker(make_config(), repository, ExcerptProvider(), now=NOW)
+
+    assert repository.saved_summaries
+    assert repository.saved_summaries[0].response_excerpt == (
+        '{"total_rows":1,"truncated":false,"rows":[{"train_code":"G1"}]}'
+    )
