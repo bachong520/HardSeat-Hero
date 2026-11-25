@@ -31,7 +31,21 @@ queryAllPublicPrice 查询公布票价
 - 定义云函数并发测绘方案。
 - 明确云函数实施约束与风险。
 
-## 2. 当前实现状态与非目标\n\n当前已实现：\n\n- `backend/app/cloud_crawl/` 已包含任务模型、repository、retry、worker、handler、PostgreSQL repository、provider 适配和 schema。\n- 云函数相关离线测试已通过：`61 passed`。\n\n当前未完成：\n\n- 具体云厂商部署配置、调度、日志、监控和告警。\n- PostgreSQL 实机集成验证。\n- station OD 响应到 `train_od_fare_edge` 的离线 merge 流程。
+## 2. 当前实现状态与非目标
+
+当前已实现：
+
+- `backend/app/cloud_crawl/` 已包含任务模型、repository、retry、worker、handler、PostgreSQL repository、provider 适配和 schema。
+- 云函数相关离线测试已通过。
+- 本地真实 provider PoC（阶段 4）已跑通，见 `docs/plans/云函数worker真实接口PoC报告_2026-11-23.md`。
+- 阶段 6 离线合并已实现：`backend/scripts/merge_cloud_responses_to_edges.py`，支持城市级与车站级两种粒度，见 5.4。
+
+当前未完成：
+
+- 具体云厂商部署配置、调度、日志、监控和告警。
+- 阶段 5 并发测绘：真实 12306 下的吞吐与封禁阈值仍未测。
+- 车站测绘表对新建车站有缺口（`上海松江`、`北京丰台` 等映射不到城市）。
+
 
 当前已实现的本地能力如上；本文档仍不做以下事项：
 
@@ -199,7 +213,13 @@ ON crawl_cloud_station_od_task(provider, crawl_date, from_station, to_station);
 
 ### 5.3 原始响应表
 
-建议保留 station OD 级别的原始响应摘要。完整响应可存对象存储，数据库只存定位字段。
+保留 station OD 级别的响应数据，分两档存：
+
+- `response_body`：完整响应信封，合并的唯一数据源。实测一条 335 趟车的 OD 约 213 KB，PostgreSQL 的 TEXT 完全放得下（上限 1 GB），暂时不需要对象存储。
+- `response_excerpt`：截断到 8000 字符的摘要，只用于人工排查和报告展示。**不能当合并输入**——335 行只装得下 11 行，而且肉眼看不出来少了多少（要翻 `total_rows` 才知道）。
+- `object_uri` 保留给将来的对象存储方案，现在恒为 `NULL`。
+
+两者信封格式相同：`{"total_rows": N, "truncated": bool, "rows": [...]}`，按整行截断，绝不切半行。
 
 ```sql
 CREATE TABLE crawl_cloud_station_od_response (
@@ -215,12 +235,27 @@ CREATE TABLE crawl_cloud_station_od_response (
     response_hash TEXT NOT NULL,
     object_uri TEXT,
     response_excerpt TEXT,
+    response_body TEXT,
     fetched_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(job_id, task_id, response_hash)
 );
+
+-- 老库升级：CREATE TABLE IF NOT EXISTS 不会给已有表补列
+ALTER TABLE crawl_cloud_station_od_response
+ADD COLUMN IF NOT EXISTS response_body TEXT;
 ```
 
-### 5.4 死信表
+### 5.4 响应到基础边的离线合并
+
+`backend/scripts/merge_cloud_responses_to_edges.py` 把响应拆信封、转换、写入 `train_od_fare_edge`。
+
+- 数据源优先级：`response_body` → 回退 `response_excerpt`（回退时报告里 `truncated` 为真、`payload_source="excerpt"`，提示数据不全）。
+- 节点粒度由 `--granularity {city,station}` 决定，默认 `city`：`北京南`、`上海虹桥` 这类站名经 `app/domain/station_city.py` 归一成 `北京`、`上海`。按车站粒度建图搜「北京→上海」会搜不到东西，因为图上根本没有叫「北京」的节点——这是 2026-11-25 实测踩到的坑。
+- 城市映射来自 `backend/app/data/station_metadata.csv`；直辖市用 `province` 列（该表 `city` 列对直辖市填的是区名），所以规则是 `province in {北京,上海,天津,重庆} ? province : city`，归一后 316 个城市。
+- 映射不到站名时回落成站名本身，并在报告里列出，例如 `上海松江`、`北京丰台`、`练塘`——说明这份测绘表对新建车站有缺口，需要补别名或不依赖它做最后一步。
+- 同一套数据可用不同 `--target-provider` 分别写成 `12306-public-price`（城市级）与 `12306-public-price-station`（车站级），因为基础边主键带 provider，两种粒度可以共存。
+
+### 5.5 死信表
 
 ```sql
 CREATE TABLE crawl_cloud_dead_letter (
