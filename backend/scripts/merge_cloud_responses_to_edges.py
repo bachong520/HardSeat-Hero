@@ -43,7 +43,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.adapters.railway_12306_public_price import PRICE_FIELDS, parse_price  # noqa: E402
+from app.adapters.railway_12306_public_price import PRICE_FIELDS, parse_price
+from app.domain.station_city import city_of_station, load_station_city_map  # noqa: E402
 from app.services.static_price_repository import (  # noqa: E402
     SQLiteStaticPriceRepository,
     TrainOdFareEdge,
@@ -62,6 +63,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database-url-env", default="CLOUD_CRAWL_DATABASE_URL")
     parser.add_argument("--target-db", type=Path, default=DEFAULT_TARGET_DB)
     parser.add_argument("--target-provider", default=DEFAULT_TARGET_PROVIDER)
+    parser.add_argument(
+        "--granularity",
+        choices=("city", "station"),
+        default="city",
+        help="节点粒度：city 用城市名（默认，便于按城市搜索），station 保留具体车站",
+    )
     parser.add_argument("--limit", type=int, default=None, help="只处理前 N 条响应，用于试跑")
     parser.add_argument("--write", action="store_true", help="真的写入目标库；不加只预览")
     return parser.parse_args()
@@ -69,9 +76,9 @@ def parse_args() -> argparse.Namespace:
 
 def load_responses(dsn: str, job_id: int, limit: int | None) -> list[dict[str, Any]]:
     sql = (
-        "SELECT task_id, from_station, to_station, crawl_date, row_count, response_excerpt"
+        "SELECT task_id, from_station, to_station, crawl_date, row_count, response_body, response_excerpt"
         " FROM crawl_cloud_station_od_response"
-        " WHERE job_id = %s AND response_excerpt IS NOT NULL"
+        " WHERE job_id = %s AND COALESCE(response_body, response_excerpt) IS NOT NULL"
         " ORDER BY task_id"
     )
     params: list[Any] = [job_id]
@@ -87,7 +94,8 @@ def load_responses(dsn: str, job_id: int, limit: int | None) -> list[dict[str, A
             "to_station": row[2],
             "crawl_date": row[3],
             "row_count": row[4],
-            "response_excerpt": row[5],
+            "response_body": row[5],
+            "response_excerpt": row[6],
         }
         for row in rows
     ]
@@ -124,15 +132,24 @@ def dto_to_edges(
     destination: str,
     target_provider: str,
     fetched_at: datetime,
+    granularity: str = "city",
+    station_city: dict[str, str] | None = None,
 ) -> list[TrainOdFareEdge]:
     """一行 queryLeftNewDTO → 每种有票价的席别一条基础边。
 
     时刻拆成"钟点 + 第几天"：基础边不带日期，一趟车每天都是同一个钟点。
 
-    节点用**任务的城市名**，不用响应里的车站名。原因：任务是「北京→上海」，
-    12306 返回的却是「北京南→上海虹桥」这种具体车站；若把车站名当节点，
-    用户搜「北京→上海」只能命中恰好叫「北京」的那一趟车。代价是丢失
-    "这趟车具体从哪个站发车"，已在报告的遗留项里记录。
+    节点粒度（`granularity`）：
+
+    - `city`（默认）：车站先过 `station_city` 映射表变成城市名。
+      任务是「北京→上海」，12306 返回的是「北京南→上海虹桥」；把车站当节点，
+      用户搜「北京→上海」就只能命中恰好叫「北京」的那一趟车。
+      `backend/app/data/station_metadata.csv` 有现成的 name→city 列。
+    - `station`：保留响应里的车站名，用于按具体车站搜索
+      （例如只想看「北京南」出发的车）。
+
+    两种粒度用不同的 provider 名写进同一个库即可共存，因为 `train_od_fare_edge`
+    的主键里带 provider。
     """
     depart_text = str(dto.get("start_time") or "").strip()
     arrive_text = str(dto.get("arrive_time") or "").strip()
@@ -160,6 +177,16 @@ def dto_to_edges(
     dto_origin = str(dto.get("from_station_name") or origin).strip()
     dto_destination = str(dto.get("to_station_name") or destination).strip()
 
+    if granularity == "station":
+        from_node, to_node = dto_origin, dto_destination
+    else:
+        from_node = city_of_station(dto_origin, station_city) or city_of_station(origin, station_city) or dto_origin
+        to_node = (
+            city_of_station(dto_destination, station_city)
+            or city_of_station(destination, station_city)
+            or dto_destination
+        )
+
     edges: list[TrainOdFareEdge] = []
     for field, seat_type in PRICE_FIELDS.items():
         price = parse_price(dto.get(field))
@@ -170,8 +197,8 @@ def dto_to_edges(
                 provider=target_provider,
                 train_no=train_no,
                 train_code=train_code,
-                from_station=origin,
-                to_station=destination,
+                from_station=from_node,
+                to_station=to_node,
                 from_station_no=int(dto.get("from_station_no") or 0),
                 to_station_no=int(dto.get("to_station_no") or 0),
                 depart_time=depart_time,
@@ -190,17 +217,32 @@ def dto_to_edges(
     return edges
 
 
-def merge(responses: list[dict[str, Any]], target_provider: str) -> tuple[list[TrainOdFareEdge], list[dict[str, Any]]]:
+def merge(
+    responses: list[dict[str, Any]],
+    target_provider: str,
+    *,
+    granularity: str = "city",
+) -> tuple[list[TrainOdFareEdge], list[dict[str, Any]]]:
     edges: list[TrainOdFareEdge] = []
     report: list[dict[str, Any]] = []
+    station_city = load_station_city_map()
     for response in responses:
         fetched_at = datetime.now(timezone.utc)
-        rows, total_rows, truncated = parse_excerpt(response["response_excerpt"])
+        # 优先用完整响应体；老数据只有摘要时退回摘要（那时 truncated 会是 true）
+        body = response.get("response_body")
+        payload = body or response["response_excerpt"]
+        source = "body" if body else "excerpt"
+        rows, total_rows, truncated = parse_excerpt(payload)
         task_edges: list[TrainOdFareEdge] = []
+        unmapped: set[str] = set()
         for row in rows:
             dto = row.get("queryLeftNewDTO") if isinstance(row, dict) else None
             if not isinstance(dto, dict):
                 continue
+            for field in ("from_station_name", "to_station_name"):
+                station = str(dto.get(field) or "").strip()
+                if station and city_of_station(station, station_city) is None:
+                    unmapped.add(station)
             task_edges.extend(
                 dto_to_edges(
                     dto,
@@ -208,6 +250,8 @@ def merge(responses: list[dict[str, Any]], target_provider: str) -> tuple[list[T
                     destination=response["to_station"],
                     target_provider=target_provider,
                     fetched_at=fetched_at,
+                    granularity=granularity,
+                    station_city=station_city,
                 )
             )
         edges.extend(task_edges)
@@ -219,7 +263,9 @@ def merge(responses: list[dict[str, Any]], target_provider: str) -> tuple[list[T
                 "rows_stored": len(rows),
                 "rows_total": total_rows,
                 "truncated": truncated,
+                "payload_source": source,
                 "edges": len(task_edges),
+                "unmapped": sorted(unmapped),
             }
         )
     return edges, report
@@ -242,9 +288,17 @@ def print_report(report: list[dict[str, Any]], edges: list[TrainOdFareEdge], tar
     truncated_tasks = [item for item in report if item["truncated"]]
     if truncated_tasks:
         print()
-        print("注意：以下任务的数据被截断，只合并了前一部分车次：")
+        print("注意：以下任务库里只有摘要、没有完整响应体，合并用的数据是被截断的：")
         for item in truncated_tasks:
             print(f"  task {item['task_id']}  {item['od']}  只有 {item['rows_stored']}/{item['rows_total']} 行")
+
+    unmapped = sorted({name for item in report for name in item.get("unmapped", [])})
+    if unmapped:
+        print()
+        print(f"注意：{len(unmapped)} 个车站不在 station_metadata.csv 里，节点回落成站名本身：")
+        print("  " + "、".join(unmapped[:20]))
+        if len(unmapped) > 20:
+            print(f"  ……还有 {len(unmapped) - 20} 个")
 
     if written:
         print()
@@ -263,7 +317,7 @@ def main() -> int:
         print(f"job {args.job_id} 没有可合并的响应（response_excerpt 全为空？）")
         return 1
 
-    edges, report = merge(responses, args.target_provider)
+    edges, report = merge(responses, args.target_provider, granularity=args.granularity)
     print_report(report, edges, args.target_db, written=args.write)
 
     if args.write and edges:

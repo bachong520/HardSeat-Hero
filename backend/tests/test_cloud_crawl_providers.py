@@ -9,6 +9,7 @@ from app.cloud_crawl.providers import (
     RESPONSE_EXCERPT_MAX_CHARS,
     Railway12306CloudPriceProvider,
     build_response_excerpt,
+    build_response_body,
     classify_railway_error,
     hash_public_price_rows,
     is_retryable_railway_error,
@@ -106,6 +107,25 @@ def test_build_response_excerpt_truncates_but_keeps_total_rows() -> None:
 
 def test_build_response_excerpt_returns_none_for_empty_rows() -> None:
     assert build_response_excerpt([]) is None
+
+
+def test_build_response_body_keeps_every_row_even_when_large() -> None:
+    """摘要装不下的数据必须完整留在 response_body 里。"""
+    rows = [{"train_code": f"G{index}", "seat": "二等座", "price": "07950"} for index in range(500)]
+
+    body = build_response_body(rows)
+
+    assert body is not None
+    payload = json.loads(body)
+    assert payload["total_rows"] == 500
+    assert payload["truncated"] is False
+    assert len(payload["rows"]) == 500
+    # 同样的数据，摘要装不下
+    assert len(build_response_excerpt(rows) or "") <= RESPONSE_EXCERPT_MAX_CHARS
+
+
+def test_build_response_body_returns_none_for_empty_rows() -> None:
+    assert build_response_body([]) is None
 
 
 async def test_railway_provider_attaches_response_excerpt() -> None:

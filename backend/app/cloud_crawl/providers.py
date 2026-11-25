@@ -40,6 +40,7 @@ class Railway12306CloudPriceProvider:
             response_hash=hash_public_price_rows(rows),
             http_status=200,
             response_excerpt=build_response_excerpt(rows),
+            response_body=build_response_body(rows),
         )
 
 
@@ -59,19 +60,35 @@ def build_response_excerpt(
     用信封而不是裸数组，是为了让读的人一眼看出「这是全部还是前几条」——
     没有 total_rows 的话，335 行被截成 40 行，和本来就只返回 40 行，长得一模一样。
     """
+    return _build_envelope(rows, max_chars=max_chars)
+
+
+def build_response_body(rows: list[dict[str, Any]]) -> str | None:
+    """完整响应体：与摘要同一个信封，但不截断（``truncated`` 恒为 false）。
+
+    摘要有 8 KB 上限，335 趟车的线路只装得下十来趟；合并要用全量就只能存这里。
+    PostgreSQL 的 TEXT 足够装下（实测一条 335 行的响应约 300 KB）。
+    """
+    return _build_envelope(rows, max_chars=None)
+
+
+def _build_envelope(rows: list[dict[str, Any]], *, max_chars: int | None) -> str | None:
     if not rows:
         return None
 
-    budget = max(max_chars - _EXCERPT_ENVELOPE_CHARS, 0)
-    kept: list[dict[str, Any]] = []
-    used = 0
-    for row in rows:
-        item_chars = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
-        extra = item_chars + (1 if kept else 0)  # 行与行之间还有一个逗号
-        if used + extra > budget and kept:
-            break
-        kept.append(row)
-        used += extra
+    if max_chars is None:
+        kept = list(rows)
+    else:
+        budget = max(max_chars - _EXCERPT_ENVELOPE_CHARS, 0)
+        kept = []
+        used = 0
+        for row in rows:
+            item_chars = len(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            extra = item_chars + (1 if kept else 0)  # 行与行之间还有一个逗号
+            if used + extra > budget and kept:
+                break
+            kept.append(row)
+            used += extra
 
     payload = {
         "total_rows": len(rows),

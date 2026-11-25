@@ -220,6 +220,36 @@ async def test_worker_passes_provider_excerpt_into_response_summary() -> None:
     )
 
 
+class BodyProvider:
+    async def query_public_price(self, task: CloudStationOdTask) -> ProviderRowsResult:
+        return ProviderRowsResult(
+            rows=[{"train_code": "G1"}],
+            response_hash=f"body:{task.id}",
+            response_body='{"total_rows":1,"truncated":false,"rows":[{"train_code":"G1"}]}',
+        )
+
+
+async def test_worker_passes_full_response_body_into_response_summary() -> None:
+    """完整响应体必须一路传到 response_summary，否则合并没有输入。"""
+    repository = RecordingRepository()
+    repository.insert_task(
+        CloudStationOdTaskDraft(
+            job_id=1,
+            provider="mock-cloud-price",
+            crawl_date=date(2026, 7, 12),
+            from_station="北京",
+            to_station="上海",
+        )
+    )
+
+    await run_cloud_price_worker(make_config(), repository, BodyProvider(), now=NOW)
+
+    assert repository.saved_summaries
+    assert repository.saved_summaries[0].response_body == (
+        '{"total_rows":1,"truncated":false,"rows":[{"train_code":"G1"}]}'
+    )
+
+
 def test_worker_finalizes_job_when_all_tasks_are_done() -> None:
     """任务全部到终态后，worker 必须把 job 从 running 推到终态。
 

@@ -91,6 +91,7 @@ class CloudStationOdResponse:
     row_count: int = 0
     object_uri: str | None = None
     response_excerpt: str | None = None
+    response_body: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,7 @@ class CloudTaskResponseSummary:
     http_status: int | None = None
     object_uri: str | None = None
     response_excerpt: str | None = None
+    response_body: str | None = None
     fetched_at: datetime | None = None
 
 

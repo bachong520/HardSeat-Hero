@@ -123,3 +123,112 @@ def test_merge_reports_truncated_tasks() -> None:
     assert report[0]["rows_stored"] == 1
     assert report[0]["rows_total"] == 52
     assert report[0]["truncated"] is True
+
+
+def test_merge_prefers_full_response_body_over_excerpt() -> None:
+    """有完整响应体时不能用摘要，否则合并出来的边会缺一大半。"""
+    rows = [{"queryLeftNewDTO": make_dto()}]
+    responses = [
+        {
+            "task_id": 5,
+            "from_station": "北京",
+            "to_station": "上海",
+            "crawl_date": date(2026, 11, 27),
+            "row_count": 52,
+            "response_body": json.dumps({"total_rows": 52, "truncated": False, "rows": rows}),
+            "response_excerpt": json.dumps(
+                {"total_rows": 52, "truncated": True, "rows": rows}
+            ),
+        }
+    ]
+
+    edges, report = merge(responses, "12306-public-price")
+
+    assert len(edges) == 3
+    assert report[0]["truncated"] is False
+    assert report[0]["payload_source"] == "body"
+
+
+def test_merge_falls_back_to_excerpt_when_body_is_missing() -> None:
+    responses = [
+        {
+            "task_id": 6,
+            "from_station": "北京",
+            "to_station": "上海",
+            "crawl_date": date(2026, 11, 27),
+            "row_count": 52,
+            "response_excerpt": json.dumps(
+                {"total_rows": 52, "truncated": True, "rows": [{"queryLeftNewDTO": make_dto()}]}
+            ),
+        }
+    ]
+
+    _, report = merge(responses, "12306-public-price")
+
+    assert report[0]["payload_source"] == "excerpt"
+    assert report[0]["truncated"] is True
+
+
+def test_dto_to_edges_maps_station_names_through_station_metadata() -> None:
+    """任务本身写的是车站（广州南→长沙南）时，也要归到城市级节点。"""
+    edges = dto_to_edges(
+        make_dto(from_station_name="广州南", to_station_name="长沙南"),
+        origin="广州南",
+        destination="长沙南",
+        target_provider="12306-public-price",
+        fetched_at=FETCHED_AT,
+    )
+
+    assert {edge.from_station for edge in edges} == {"广州"}
+    assert {edge.to_station for edge in edges} == {"长沙"}
+
+
+def test_dto_to_edges_keeps_station_nodes_for_station_granularity() -> None:
+    edges = dto_to_edges(
+        make_dto(),
+        origin="北京",
+        destination="上海",
+        target_provider="12306-public-price-station",
+        fetched_at=FETCHED_AT,
+        granularity="station",
+    )
+
+    assert {edge.from_station for edge in edges} == {"北京南"}
+    assert {edge.to_station for edge in edges} == {"上海虹桥"}
+
+
+def test_dto_to_edges_falls_back_to_station_name_when_unmapped() -> None:
+    edges = dto_to_edges(
+        make_dto(from_station_name="不存在站", to_station_name="上海虹桥"),
+        origin="北京",
+        destination="上海",
+        target_provider="12306-public-price",
+        fetched_at=FETCHED_AT,
+        station_city={},
+    )
+
+    assert {edge.from_station for edge in edges} == {"不存在站"}
+    assert {edge.to_station for edge in edges} == {"上海虹桥"}
+
+
+def test_merge_reports_stations_missing_from_station_metadata() -> None:
+    responses = [
+        {
+            "task_id": 5,
+            "from_station": "北京",
+            "to_station": "上海",
+            "crawl_date": date(2026, 11, 27),
+            "row_count": 1,
+            "response_excerpt": json.dumps(
+                {
+                    "total_rows": 1,
+                    "truncated": False,
+                    "rows": [{"queryLeftNewDTO": make_dto(from_station_name="未知小站")}],
+                }
+            ),
+        }
+    ]
+
+    _, report = merge(responses, "12306-public-price")
+
+    assert report[0]["unmapped"] == ["未知小站"]

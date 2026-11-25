@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS crawl_cloud_station_od_response (
     response_hash TEXT NOT NULL,
     object_uri TEXT,
     response_excerpt TEXT,
+    response_body TEXT,
     fetched_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(job_id, task_id, response_hash)
 );
@@ -107,3 +108,7 @@ ON crawl_cloud_dead_letter(job_id, created_at, id);
 
 CREATE INDEX IF NOT EXISTS idx_crawl_cloud_dead_letter_key
 ON crawl_cloud_dead_letter(provider, crawl_date, from_station, to_station);
+
+-- 老库升级：完整响应体是后加的列，CREATE TABLE IF NOT EXISTS 不会给已有表补列。
+ALTER TABLE crawl_cloud_station_od_response
+ADD COLUMN IF NOT EXISTS response_body TEXT;

@@ -149,6 +149,7 @@ class InMemoryCloudCrawlRepository:
             http_status=response_summary.http_status,
             object_uri=response_summary.object_uri,
             response_excerpt=response_summary.response_excerpt,
+            response_body=response_summary.response_body,
             fetched_at=fetched_at,
         )
         self._responses.add((response.job_id, response.task_id, response.response_hash))

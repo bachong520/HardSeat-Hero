@@ -174,8 +174,8 @@ class PostgresCloudCrawlRepository:
                     INSERT INTO crawl_cloud_station_od_response (
                         job_id, task_id, provider, crawl_date, from_station, to_station,
                         status, http_status, row_count, response_hash, object_uri,
-                        response_excerpt, fetched_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, 'succeeded', %s, %s, %s, %s, %s, %s)
+                        response_excerpt, response_body, fetched_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, 'succeeded', %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (job_id, task_id, response_hash) DO NOTHING
                     """,
                     (
@@ -190,6 +190,7 @@ class PostgresCloudCrawlRepository:
                         response_summary.response_hash,
                         response_summary.object_uri,
                         response_summary.response_excerpt,
+                        response_summary.response_body,
                         fetched_at,
                     ),
                 )
